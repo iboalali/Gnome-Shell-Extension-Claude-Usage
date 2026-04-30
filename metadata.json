@@ -1,0 +1,7 @@
+{
+  "uuid": "claude-usage@iboalali",
+  "name": "Claude Usage",
+  "description": "Live Claude Code session usage in the top bar (token-level, via ccusage).",
+  "shell-version": ["45", "46", "47"],
+  "version-name": "0.1.0"
+}
