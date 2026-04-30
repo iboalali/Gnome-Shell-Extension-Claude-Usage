@@ -81,6 +81,26 @@ function fmtAgo(ms) {
     return `${Math.floor(h / 24)}d ago`;
 }
 
+const BAR_WIDTH = 10;
+const BAR_PARTIAL = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+
+function fmtBar(pct) {
+    if (pct == null || !Number.isFinite(pct)) return '[' + '░'.repeat(BAR_WIDTH) + ']';
+    const clamped = Math.max(0, Math.min(100, pct));
+    const eighths = Math.round((clamped / 100) * BAR_WIDTH * 8);
+    const full = Math.floor(eighths / 8);
+    const partial = eighths % 8;
+    let bar = '█'.repeat(full);
+    if (partial > 0) bar += BAR_PARTIAL[partial];
+    bar += '░'.repeat(BAR_WIDTH - full - (partial > 0 ? 1 : 0));
+    return `[${bar}]`;
+}
+
+const LABEL_WIDTH = 14;
+function kv(label, value) {
+    return label.padEnd(LABEL_WIDTH) + value;
+}
+
 function logTag(msg) {
     log(`[claude-usage] ${msg}`);
 }
@@ -98,22 +118,29 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this.add_child(this._label);
 
         // OAuth percentages on top — they're the more important number
-        this._sessionItem = new PopupMenu.PopupMenuItem('Session (5h):  —', {reactive: false});
-        this._weekItem    = new PopupMenu.PopupMenuItem('Week (7d):     —', {reactive: false});
+        this._sessionItem = new PopupMenu.PopupMenuItem('Session (5h):', {reactive: false});
+        this._weekItem    = new PopupMenu.PopupMenuItem('Week (7d):',    {reactive: false});
         this.menu.addMenuItem(this._sessionItem);
         this.menu.addMenuItem(this._weekItem);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         // ccusage rows
-        this._tokensItem = new PopupMenu.PopupMenuItem('Tokens: —', {reactive: false});
-        this._burnItem   = new PopupMenu.PopupMenuItem('Burn:   —', {reactive: false});
-        this._costItem   = new PopupMenu.PopupMenuItem('Cost:   —', {reactive: false});
-        this._endsItem   = new PopupMenu.PopupMenuItem('Ends in: —', {reactive: false});
+        this._tokensItem = new PopupMenu.PopupMenuItem('Tokens:',  {reactive: false});
+        this._burnItem   = new PopupMenu.PopupMenuItem('Burn:',    {reactive: false});
+        this._costItem   = new PopupMenu.PopupMenuItem('Cost:',    {reactive: false});
+        this._endsItem   = new PopupMenu.PopupMenuItem('Ends in:', {reactive: false});
         this.menu.addMenuItem(this._tokensItem);
         this.menu.addMenuItem(this._burnItem);
         this.menu.addMenuItem(this._costItem);
         this.menu.addMenuItem(this._endsItem);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        // Monospace the inner labels so the progress bar and column labels line up.
+        for (const item of [this._sessionItem, this._weekItem,
+                            this._tokensItem, this._burnItem,
+                            this._costItem, this._endsItem]) {
+            item.label.add_style_class_name('claude-usage-mono');
+        }
 
         const openTermItem = new PopupMenu.PopupMenuItem('Open ccusage in terminal');
         openTermItem.connect('activate', () => this._openInTerminal());
@@ -373,6 +400,14 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         const ccState    = this._classifyCcusage();
 
         // ---- OAuth menu rows ----
+        const renderPctRow = (label, bucket, ageNote) => {
+            if (!bucket) return kv(label, 'unavailable — field missing in response');
+            const bar = fmtBar(bucket.utilization);
+            const pct = fmtPct(bucket.utilization).padStart(4);
+            const reset = fmtUntilIso(bucket.resets_at);
+            return kv(label, `${bar} ${pct}  resets in ${reset}${ageNote}`);
+        };
+
         if (oauthState === 'dead') {
             const reason = this._lastOauthError?.message || 'no data';
             if (this._lastOauth) {
@@ -380,50 +415,40 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 const five = this._lastOauth.five_hour;
                 const seven = this._lastOauth.seven_day;
                 this._sessionItem.label.set_text(
-                    `Session (5h): unavailable — ${reason} (last ${five ? fmtPct(five.utilization) : '—'}, ${age})`
+                    kv('Session (5h):', `unavailable — ${reason} (last ${five ? fmtPct(five.utilization) : '—'}, ${age})`)
                 );
                 this._weekItem.label.set_text(
-                    `Week (7d):    unavailable — ${reason} (last ${seven ? fmtPct(seven.utilization) : '—'}, ${age})`
+                    kv('Week (7d):', `unavailable — ${reason} (last ${seven ? fmtPct(seven.utilization) : '—'}, ${age})`)
                 );
             } else {
-                this._sessionItem.label.set_text(`Session (5h): unavailable — ${reason}`);
-                this._weekItem.label.set_text(`Week (7d):    unavailable — ${reason}`);
+                this._sessionItem.label.set_text(kv('Session (5h):', `unavailable — ${reason}`));
+                this._weekItem.label.set_text(kv('Week (7d):', `unavailable — ${reason}`));
             }
         } else {
-            const five  = this._lastOauth.five_hour;
-            const seven = this._lastOauth.seven_day;
             const ageNote = oauthState === 'stale'
-                ? ` — last refreshed ${fmtAgo(Date.now() - this._lastOauth.fetchedAt)}`
+                ? `  (${fmtAgo(Date.now() - this._lastOauth.fetchedAt)})`
                 : '';
-            this._sessionItem.label.set_text(
-                five
-                    ? `Session (5h): ${fmtPct(five.utilization)} — resets in ${fmtUntilIso(five.resets_at)}${ageNote}`
-                    : 'Session (5h): unavailable — field missing in response'
-            );
-            this._weekItem.label.set_text(
-                seven
-                    ? `Week (7d):    ${fmtPct(seven.utilization)} — resets in ${fmtUntilIso(seven.resets_at)}${ageNote}`
-                    : 'Week (7d):    unavailable — field missing in response'
-            );
+            this._sessionItem.label.set_text(renderPctRow('Session (5h):', this._lastOauth.five_hour, ageNote));
+            this._weekItem.label.set_text(renderPctRow('Week (7d):', this._lastOauth.seven_day, ageNote));
         }
 
         // ---- ccusage menu rows ----
         if (ccState === 'fresh') {
             const a = this._activeBlock();
-            this._tokensItem.label.set_text(`Tokens: ${fmtTokens(a.totalTokens ?? 0)}`);
-            this._burnItem.label.set_text(`Burn:   ${fmtTokens(a.burnRate?.tokensPerMinute)} tok/min`);
-            this._costItem.label.set_text(`Cost:   ${fmtUSD(a.costUSD)}`);
-            this._endsItem.label.set_text(`Ends in: ${fmtMins(a.projection?.remainingMinutes)}`);
+            this._tokensItem.label.set_text(kv('Tokens:',  fmtTokens(a.totalTokens ?? 0)));
+            this._burnItem.label.set_text(kv('Burn:',     `${fmtTokens(a.burnRate?.tokensPerMinute)} tok/min`));
+            this._costItem.label.set_text(kv('Cost:',      fmtUSD(a.costUSD)));
+            this._endsItem.label.set_text(kv('Ends in:',   fmtMins(a.projection?.remainingMinutes)));
         } else if (ccState === 'idle') {
-            this._tokensItem.label.set_text('Tokens: — (no active block)');
-            this._burnItem.label.set_text('Burn:   —');
-            this._costItem.label.set_text('Cost:   —');
-            this._endsItem.label.set_text('Ends in: —');
+            this._tokensItem.label.set_text(kv('Tokens:',  '— (no active block)'));
+            this._burnItem.label.set_text(kv('Burn:',      '—'));
+            this._costItem.label.set_text(kv('Cost:',      '—'));
+            this._endsItem.label.set_text(kv('Ends in:',   '—'));
         } else {
-            this._tokensItem.label.set_text(`Tokens: error — ${this._ccusageError ?? 'unknown'}`);
-            this._burnItem.label.set_text('Burn:   —');
-            this._costItem.label.set_text('Cost:   —');
-            this._endsItem.label.set_text('Ends in: —');
+            this._tokensItem.label.set_text(kv('Tokens:',  `error — ${this._ccusageError ?? 'unknown'}`));
+            this._burnItem.label.set_text(kv('Burn:',      '—'));
+            this._costItem.label.set_text(kv('Cost:',      '—'));
+            this._endsItem.label.set_text(kv('Ends in:',   '—'));
         }
 
         // ---- top bar ----

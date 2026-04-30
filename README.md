@@ -9,13 +9,13 @@ breakdown.
 ```
 🟢 12% · 1.2M · 3h12m            ← top bar (session% · tokens · time-left)
 
-  Session (5h): 12% — resets in 3h12m       ← click → dropdown
-  Week (7d):    38% — resets in 4d18h
+  Session (5h): [█▏░░░░░░░░]  12%  resets in 3h12m   ← click → dropdown
+  Week (7d):    [███▏░░░░░░]  38%  resets in 4d18h     (monospace, ASCII bars)
   ─────────────
-  Tokens:  1.2M
-  Burn:    16.5k tok/min
-  Cost:    $4.20
-  Ends in: 3h 12m
+  Tokens:       1.2M
+  Burn:         16.5k tok/min
+  Cost:         $4.20
+  Ends in:      3h12m
   ─────────────
   Open ccusage in terminal
   Refresh now

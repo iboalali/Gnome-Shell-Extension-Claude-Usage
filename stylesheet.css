@@ -1,3 +1,7 @@
 .claude-usage-label {
   font-feature-settings: "tnum";
 }
+
+.claude-usage-mono {
+  font-family: "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
+}
