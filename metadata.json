@@ -1,7 +1,8 @@
 {
-  "uuid": "claude-usage@iboalali",
+  "uuid": "claude-usage@iboalali.github.io",
   "name": "Claude Usage",
   "description": "Live Claude Code session usage in the top bar (token-level, via ccusage).",
   "shell-version": ["45", "46", "47"],
+  "url": "https://github.com/iboalali/Gnome-Shell-Extension-Claude-Usage",
   "version-name": "0.1.0"
 }
