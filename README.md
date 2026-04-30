@@ -101,21 +101,56 @@ No GUI yet (see [ROADMAP.md](ROADMAP.md)). Tweak constants at the top of
 ## Development
 
 GNOME Shell on Wayland does **not** support live extension reloads
-(`Alt+F2 r` is X11-only). Two options:
+(`Alt+F2 r` is X11-only). For a fast iteration loop, run a **nested
+shell** in a window — it boots in ~2 seconds and picks up your latest
+`extension.js` on every restart.
 
-1. **Logout/login** after edits — slow but reliable.
-2. **Nested shell** for tighter loops:
-   ```sh
-   dbus-run-session -- gnome-shell --nested --wayland
-   ```
-   Enable the extension inside the nested instance.
+### Live iteration loop (nested shell)
 
-Tail JS errors and the extension's own log lines:
+Open two terminals:
+
+**Terminal 1** — tail JS errors and the extension's own log lines so
+crashes are visible the moment they happen:
+
 ```sh
 journalctl -f -o cat /usr/bin/gnome-shell | grep -i 'claude-usage\|claude'
 ```
 
-Syntax-check `extension.js` without launching the shell:
+**Terminal 2** — the dev shell:
+
+```sh
+dbus-run-session -- gnome-shell --nested --wayland
+```
+
+This opens a small GNOME Shell *inside* a window. The extension
+auto-loads (it's already enabled in your main session's dconf), so
+its top-bar item appears within ~60 s. To pick up an edit:
+
+1. Save `extension.js` (the symlink means it's already in the
+   extensions dir — no copy step).
+2. Focus terminal 2, `Ctrl+C` to kill the nested shell.
+3. ↑ + Enter to relaunch — fresh module imports, edits are live.
+
+Caveats:
+
+- The nested shell **shares dconf with your main session**, so toggling
+  extensions inside it affects the main session too. Don't `gnome-extensions
+  disable/enable` from inside the nested shell — just restart the process.
+- The nested window renders smaller and font metrics differ slightly from
+  the real panel. Do a real logout/login before calling a UI tweak done.
+
+### Alternatives if the nested shell isn't an option
+
+- **Logout / login** — slow (~60 s) but always works.
+- **Switch to "Ubuntu on Xorg"** at the GDM login screen (gear icon
+  next to the Login button). Under X11, `Alt+F2 → r` restarts the
+  shell in place, giving you the same iteration loop without a nested
+  window. Switch back to Wayland once you're done.
+
+### Sanity checks without launching the shell
+
+Syntax-check the JS:
+
 ```sh
 node --check extension.js
 ```
