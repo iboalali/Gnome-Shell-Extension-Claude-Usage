@@ -1,13 +1,18 @@
 # Claude Usage — GNOME Shell Extension
 
-A live indicator in the GNOME top bar for your active **Claude Code** session
-usage. Shows tokens used and time remaining in the current 5-hour billing
-window; click for a dropdown with burn rate, cost, and projected end.
+A live indicator in the GNOME top bar for your **Claude Code** usage.
+Shows the same session and weekly percentages that `/usage` inside Claude
+Code shows, alongside locally-computed token totals and the time remaining
+in the active 5-hour billing window. Click for a dropdown with the full
+breakdown.
 
 ```
-🟢 1.2M · 3h12m       ← top bar
+🟢 12% · 1.2M · 3h12m            ← top bar (session% · tokens · time-left)
 
-  Tokens:  1.2M       ← click → dropdown
+  Session (5h): 12% — resets in 3h12m       ← click → dropdown
+  Week (7d):    38% — resets in 4d18h
+  ─────────────
+  Tokens:  1.2M
   Burn:    16.5k tok/min
   Cost:    $4.20
   Ends in: 3h 12m
@@ -16,10 +21,31 @@ window; click for a dropdown with burn rate, cost, and projected end.
   Refresh now
 ```
 
-> Phase 1 reads token totals from your local `~/.claude/projects/*.jsonl`
-> transcripts via [`ccusage`][ccusage]. Server-side session/weekly rate-limit
-> percentages (the ones shown by `/usage` inside Claude Code) are not yet
-> exposed; that's a future enhancement.
+## How it works
+
+The indicator merges two independent data sources:
+
+1. **OAuth percentages** — the authoritative session and weekly utilization
+   numbers, fetched from `https://api.anthropic.com/api/oauth/usage` using
+   the OAuth token Claude Code already maintains in
+   `~/.claude/.credentials.json`. Polled every **5–9 min with random jitter**
+   to stay well under the endpoint's rate limit. Last response is cached at
+   `~/.cache/claude-usage/last-oauth.json` for warm starts.
+2. **Local token totals** — burn rate, cost, time-remaining for the active
+   5-hour block, parsed from your `~/.claude/projects/*.jsonl` transcripts
+   via [`ccusage`][ccusage]. Polled every **60 s** and on menu open.
+
+The two paths are independent: if the OAuth endpoint is unreachable the
+indicator drops the percentage and switches to a yellow `🟡` icon, but
+ccusage tokens keep updating.
+
+| Top-bar emoji | Meaning |
+|---|---|
+| `🟢` | Both sources fresh. Top bar shows percentage. |
+| `🟢 12%*` | OAuth response is older than 20 min; ccusage still fresh. |
+| `🟡` | OAuth endpoint dead/unreachable; ccusage still working. |
+| `⚪` | No active block and 0% session usage. |
+| `⚠️` | Both sources broken. |
 
 [ccusage]: https://github.com/ryoppippi/ccusage
 
@@ -31,6 +57,9 @@ window; click for a dropdown with burn rate, cost, and projected end.
   ```sh
   sudo npm install -g ccusage
   ```
+- **A Claude Pro / Max / Team subscription** signed in via `claude login`
+  for the OAuth percentages to work. Without it the OAuth path stays
+  `🟡` (unavailable) and you only get the ccusage-based view.
 - **`gnome-terminal`** (for the "Open ccusage in terminal" menu item).
   Replace the path in `extension.js` if you use a different terminal.
 
@@ -49,17 +78,25 @@ gnome-extensions enable claude-usage@iboalali.github.io
 ```sh
 gnome-extensions disable claude-usage@iboalali.github.io
 rm ~/.local/share/gnome-shell/extensions/claude-usage@iboalali.github.io
+rm -rf ~/.cache/claude-usage
 ```
 
 ## Configuration
 
-No GUI yet. Tweak constants at the top of `extension.js`:
+No GUI yet (see [ROADMAP.md](ROADMAP.md)). Tweak constants at the top of
+`extension.js`:
 
-| Constant       | Default                      | What it does                          |
-|----------------|------------------------------|---------------------------------------|
-| `REFRESH_SEC`  | `60`                         | How often to re-poll ccusage          |
-| `CCUSAGE`      | `/usr/local/bin/ccusage`     | Path to the ccusage binary            |
-| `CCUSAGE_ARGS` | `blocks --active --json --offline` | ccusage invocation flags        |
+| Constant                  | Default                        | What it does                                           |
+|---------------------------|--------------------------------|--------------------------------------------------------|
+| `CCUSAGE_INTERVAL_SEC`    | `60`                           | ccusage poll interval                                  |
+| `CCUSAGE`                 | `/usr/local/bin/ccusage`       | Path to the ccusage binary                             |
+| `CCUSAGE_ARGS`            | `blocks --active --json --offline` | ccusage invocation flags                          |
+| `OAUTH_BASE_SEC`          | `420` (7 min)                  | Base interval between OAuth fetches                    |
+| `OAUTH_JITTER_SEC`        | `120` (±2 min)                 | Random jitter added to each OAuth tick                 |
+| `OAUTH_BACKOFF_MAX_SEC`   | `1800` (30 min)                | Ceiling on exponential backoff after 429s              |
+| `OAUTH_STALE_AFTER_MS`    | 20 min                         | When the top-bar percentage gets the `*` stale marker |
+| `OAUTH_DEAD_AFTER_MS`     | 2 h                            | When OAuth is treated as dead and the % is dropped     |
+| `OAUTH_DEAD_MAX_FAILS`    | `6`                            | Consecutive non-2xx responses before marking dead      |
 
 ## Development
 
@@ -73,15 +110,52 @@ GNOME Shell on Wayland does **not** support live extension reloads
    ```
    Enable the extension inside the nested instance.
 
-Tail JS errors:
+Tail JS errors and the extension's own log lines:
 ```sh
-journalctl -f -o cat /usr/bin/gnome-shell | grep -i claude
+journalctl -f -o cat /usr/bin/gnome-shell | grep -i 'claude-usage\|claude'
 ```
 
 Syntax-check `extension.js` without launching the shell:
 ```sh
 node --check extension.js
 ```
+
+Verify the OAuth endpoint by hand:
+```sh
+TOKEN=$(jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json)
+curl -s -H "Authorization: Bearer $TOKEN" \
+     -H "anthropic-beta: oauth-2025-04-20" \
+     -H "Content-Type: application/json" \
+     https://api.anthropic.com/api/oauth/usage | jq
+```
+
+## A note on the OAuth endpoint
+
+`https://api.anthropic.com/api/oauth/usage` is **undocumented**. It powers
+the `/usage` command inside Claude Code and is also used by community
+projects like [`claude-code-statusline`][statusline] and [`CodexBar`][codexbar].
+Anthropic's stated position is that OAuth tokens are intended for Claude
+Code and Claude.ai; using them in third-party tools is, strictly read,
+discouraged. This extension takes a conservative interpretation:
+
+- It reads **your own** token from the file Claude Code itself maintains.
+- It never writes to that file or attempts to refresh tokens.
+- It polls at **5–9 min** intervals — substantially slower than `/usage`'s
+  on-demand rate — to be a good citizen and stay under the endpoint's
+  rate limit.
+- It degrades gracefully if the endpoint stops answering: ccusage data
+  continues to flow and the panel switches to `🟡`.
+
+If Anthropic ships an officially-supported way to query subscription
+quotas, the OAuth path will be replaced with that.
+
+[statusline]: https://github.com/ohugonnot/claude-code-statusline
+[codexbar]: https://github.com/steipete/CodexBar
+
+## Roadmap
+
+Future work — settings UI, threshold notifications, multi-account, EGO
+submission — lives in [ROADMAP.md](ROADMAP.md).
 
 ## License
 
@@ -90,5 +164,7 @@ GPL-3.0 — see [LICENSE](LICENSE).
 ## Acknowledgments
 
 - [ccusage](https://github.com/ryoppippi/ccusage) for the JSONL parsing and
-  block aggregation that this extension is just a thin GUI over.
+  block aggregation that one half of this extension is a thin GUI over.
+- [`claude-code-statusline`](https://github.com/ohugonnot/claude-code-statusline)
+  for the reference shell implementation of the OAuth endpoint call.
 - [Anthropic's Claude Code](https://claude.com/claude-code).
