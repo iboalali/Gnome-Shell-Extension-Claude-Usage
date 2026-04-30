@@ -119,8 +119,15 @@ journalctl -f -o cat /usr/bin/gnome-shell | grep -i 'claude-usage\|claude'
 **Terminal 2** — the dev shell:
 
 ```sh
-dbus-run-session -- gnome-shell --nested --wayland
+MUTTER_DEBUG_DUMMY_MODE_SPECS=1920x1080 dbus-run-session -- gnome-shell --nested --wayland
 ```
+
+The `MUTTER_DEBUG_DUMMY_MODE_SPECS` env var sizes the nested shell's
+virtual monitor — without it the default is ~1024×768 and the panel
+truncates this extension's label to `…`. Set it to match your real
+monitor (or larger). Multi-monitor testing: chain values, e.g.
+`1920x1080,1280x720`. To simulate more monitors set
+`MUTTER_DEBUG_NUM_DUMMY_MONITORS=2`.
 
 This opens a small GNOME Shell *inside* a window. The extension
 auto-loads (it's already enabled in your main session's dconf), so
