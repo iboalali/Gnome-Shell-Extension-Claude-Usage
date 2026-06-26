@@ -42,6 +42,10 @@ gnome-extensions enable  claude-usage@iboalali.github.io
 gnome-extensions disable claude-usage@iboalali.github.io
 ```
 
+> ⚠️ On Wayland, `disable`/`enable` only toggle extension **state** — they do **not** load edited
+> `extension.js`. To actually run new code you must restart `gnome-shell` (log out/in) or use the
+> nested Shell. See "Live iteration loop" below — this trap eats hours if you don't know it.
+
 Verify the OAuth endpoint by hand (useful when the indicator goes 🟡):
 
 ```sh
@@ -54,15 +58,23 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 ## Live iteration loop (Wayland can't live-reload)
 
-`Alt+F2 r` is X11-only. The fast loop is a nested Shell:
+**`gnome-extensions disable && enable` does NOT reload edited code on Wayland.** GNOME Shell imports the extension's ESM module once and caches it for the life of the `gnome-shell` process; disable/enable only re-run `disable()`/`enable()` on the *already-loaded* instance — they never re-read `extension.js` from disk. The trap: the warm-start and "next OAuth tick in Xs" log lines *do* reappear on enable (because `enable()` re-runs), so it looks like a reload happened when it didn't. Edit the file, toggle the extension, and you'll silently keep running the old code — confirmed the hard way while shipping the absolute-reset-time rows.
+
+`Alt+F2 r` (the in-place Shell restart) is X11-only, so on Wayland the only two ways to actually load new code are:
+
+1. **Log out and back in** — full `gnome-shell` restart; the definitive test, against the real panel.
+2. **Nested Shell** — spawns a fresh `gnome-shell` that reads `extension.js` from disk:
 
 ```sh
 # Terminal 1 — tail Shell + extension logs
 journalctl -f -o cat /usr/bin/gnome-shell | grep -i 'claude-usage\|claude'
 
 # Terminal 2 — nested Shell (Ctrl+C and ↑+Enter to reload after edits)
-MUTTER_DEBUG_DUMMY_MODE_SPECS=1920x1080 dbus-run-session -- gnome-shell --nested --wayland
+WAYLAND_DISPLAY=wayland-0 MUTTER_DEBUG_DUMMY_MODE_SPECS=1920x1080 \
+    dbus-run-session -- gnome-shell --nested --wayland
 ```
+
+`WAYLAND_DISPLAY` must be set or the nested mutter has no host compositor to nest into, falls back to X11, and dies with `Unable to open display ':0'` / `Invalid MIT-MAGIC-COOKIE-1 key`. Use the actual socket name from `ls "$XDG_RUNTIME_DIR"/wayland-*` (usually `wayland-0`).
 
 `MUTTER_DEBUG_DUMMY_MODE_SPECS` matters: without it the virtual monitor is ~1024×768 and the panel truncates the extension label to `…`, hiding regressions. The nested shell **shares dconf with the main session**, so don't `gnome-extensions disable/enable` from inside it — just kill and relaunch the process. Font metrics differ slightly from the real panel; verify UI tweaks with a real logout/login before calling them done.
 
