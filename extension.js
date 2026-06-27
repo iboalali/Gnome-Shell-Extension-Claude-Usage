@@ -71,6 +71,17 @@ function fmtUntilIso(iso) {
     return `${d}d${h % 24}h`;
 }
 
+// Absolute local wall-clock for a reset timestamp, e.g. "Sat 27 Jun 16:59".
+// Locale-aware via GLib (honours LC_TIME); returns null when unparseable.
+function fmtAbsIso(iso) {
+    if (!iso) return null;
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return null;
+    const dt = GLib.DateTime.new_from_unix_local(Math.floor(t / 1000));
+    if (!dt) return null;
+    return dt.format('%a %d %b %H:%M');
+}
+
 function fmtAgo(ms) {
     if (ms == null || ms < 0) return 'just now';
     const m = Math.floor(ms / 60_000);
@@ -117,11 +128,17 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         });
         this.add_child(this._label);
 
-        // OAuth percentages on top — they're the more important number
-        this._sessionItem = new PopupMenu.PopupMenuItem('Session (5h):', {reactive: false});
-        this._weekItem    = new PopupMenu.PopupMenuItem('Week (7d):',    {reactive: false});
+        // OAuth percentages on top — they're the more important number.
+        // Each pct row gets a dedicated sub-row beneath it for the absolute
+        // reset wall-clock (a single St.Label won't render a second line here).
+        this._sessionItem      = new PopupMenu.PopupMenuItem('Session (5h):', {reactive: false});
+        this._sessionResetItem = new PopupMenu.PopupMenuItem('', {reactive: false});
+        this._weekItem         = new PopupMenu.PopupMenuItem('Week (7d):',    {reactive: false});
+        this._weekResetItem    = new PopupMenu.PopupMenuItem('', {reactive: false});
         this.menu.addMenuItem(this._sessionItem);
+        this.menu.addMenuItem(this._sessionResetItem);
         this.menu.addMenuItem(this._weekItem);
+        this.menu.addMenuItem(this._weekResetItem);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         // ccusage rows
@@ -136,7 +153,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         // Monospace the inner labels so the progress bar and column labels line up.
-        for (const item of [this._sessionItem, this._weekItem,
+        for (const item of [this._sessionItem, this._sessionResetItem,
+                            this._weekItem, this._weekResetItem,
                             this._tokensItem, this._burnItem,
                             this._costItem, this._endsItem]) {
             item.label.add_style_class_name('claude-usage-mono');
@@ -400,12 +418,27 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         const ccState    = this._classifyCcusage();
 
         // ---- OAuth menu rows ----
-        const renderPctRow = (label, bucket, ageNote) => {
-            if (!bucket) return kv(label, 'unavailable — field missing in response');
+        // Each pct row writes its main line, plus an indented sub-row with the
+        // absolute reset wall-clock (its own menu item, so it always renders).
+        const setPctRow = (mainItem, resetItem, label, bucket, ageNote) => {
+            if (!bucket) {
+                mainItem.label.set_text(kv(label, 'unavailable — field missing in response'));
+                resetItem.visible = false;
+                return;
+            }
             const bar = fmtBar(bucket.utilization);
             const pct = fmtPct(bucket.utilization).padStart(4);
             const reset = fmtUntilIso(bucket.resets_at);
-            return kv(label, `${bar} ${pct}  resets in ${reset}${ageNote}`);
+            const valuePrefix = `${bar} ${pct}  `;   // everything left of "resets in"
+            mainItem.label.set_text(kv(label, `${valuePrefix}resets in ${reset}${ageNote}`));
+            const abs = fmtAbsIso(bucket.resets_at);
+            if (abs) {
+                // Align the absolute line under "resets in …", not under the bar.
+                resetItem.label.set_text(' '.repeat(LABEL_WIDTH + valuePrefix.length) + `↳ ${abs}`);
+                resetItem.visible = true;
+            } else {
+                resetItem.visible = false;
+            }
         };
 
         if (oauthState === 'dead') {
@@ -424,12 +457,14 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._sessionItem.label.set_text(kv('Session (5h):', `unavailable — ${reason}`));
                 this._weekItem.label.set_text(kv('Week (7d):', `unavailable — ${reason}`));
             }
+            this._sessionResetItem.visible = false;
+            this._weekResetItem.visible = false;
         } else {
             const ageNote = oauthState === 'stale'
                 ? `  (${fmtAgo(Date.now() - this._lastOauth.fetchedAt)})`
                 : '';
-            this._sessionItem.label.set_text(renderPctRow('Session (5h):', this._lastOauth.five_hour, ageNote));
-            this._weekItem.label.set_text(renderPctRow('Week (7d):', this._lastOauth.seven_day, ageNote));
+            setPctRow(this._sessionItem, this._sessionResetItem, 'Session (5h):', this._lastOauth.five_hour, ageNote);
+            setPctRow(this._weekItem, this._weekResetItem, 'Week (7d):', this._lastOauth.seven_day, ageNote);
         }
 
         // ---- ccusage menu rows ----
