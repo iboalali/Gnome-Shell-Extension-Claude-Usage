@@ -10,7 +10,9 @@ breakdown.
 🟢 12% · 1.2M · 3h12m            ← top bar (session% · tokens · time-left)
 
   Session (5h): [█▏░░░░░░░░]  12%  resets in 3h12m   ← click → dropdown
+                                   ↳ Tue 24 Jun 15:24    ← absolute reset time
   Week (7d):    [███▏░░░░░░]  38%  resets in 4d18h     (monospace, ASCII bars)
+                                   ↳ Sat 28 Jun 06:00
   ─────────────
   Tokens:       1.2M
   Burn:         16.5k tok/min
