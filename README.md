@@ -75,6 +75,14 @@ cd Gnome-Shell-Extension-Claude-Usage
 gnome-extensions enable claude-usage@iboalali.github.io
 ```
 
+`install.sh` **symlinks** the clone into the extensions directory rather than
+copying it, so your edits are what the shell loads. The trade-off: moving or
+renaming the clone leaves the link dangling, and GNOME Shell skips broken
+links at login without reporting an error — `gnome-extensions enable` just
+answers `does not exist`, which looks like a missing extension rather than a
+bad path. Re-run `./install.sh` from the new location to repoint it (it warns
+when it finds a stale link), then log out and back in.
+
 ## Uninstall
 
 ```sh

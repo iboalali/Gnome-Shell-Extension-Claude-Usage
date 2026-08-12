@@ -46,6 +46,14 @@ gnome-extensions disable claude-usage@iboalali.github.io
 > `extension.js`. To actually run new code you must restart `gnome-shell` (log out/in) or use the
 > nested Shell. See "Live iteration loop" below — this trap eats hours if you don't know it.
 
+> ⚠️ The install is a **symlink**, so moving or renaming this checkout leaves it dangling — and
+> GNOME Shell skips broken links at login **silently**. `gnome-extensions info|enable <uuid>` then
+> answers "does not exist" (exit 2), which reads like a missing extension rather than the path
+> problem it is. Re-run `./install.sh` from the new location to repoint it; it detects a stale link
+> and warns. The running Shell holds no record of the extension until a logout/login, so `enable`
+> keeps failing until then — and is unnecessary anyway when the UUID is still listed in
+> `gsettings get org.gnome.shell enabled-extensions`, since the indicator then returns on its own.
+
 Verify the OAuth endpoint by hand (useful when the indicator goes 🟡):
 
 ```sh
