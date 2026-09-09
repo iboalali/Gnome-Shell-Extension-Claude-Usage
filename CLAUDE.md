@@ -10,7 +10,7 @@ A GNOME Shell extension (UUID `claude-usage@iboalali.github.io`, ESM, Shell 45/4
 
 The indicator deliberately merges two unrelated sources so that one going down doesn't blank the panel:
 
-1. **OAuth path** (`_refreshOauth`): GETs `https://api.anthropic.com/api/oauth/usage` using the bearer token read from `~/.claude/.credentials.json` (`claudeAiOauth.accessToken`). Yields the `five_hour` and `seven_day` `utilization` percentages — the same numbers `/usage` shows inside Claude Code. Polled every **5–9 min with random jitter** (`OAUTH_BASE_SEC` ± `OAUTH_JITTER_SEC`). Last good response is persisted to `~/.cache/claude-usage/last-oauth.json` for warm starts.
+1. **OAuth path** (`_refreshOauth`): GETs `https://api.anthropic.com/api/oauth/usage` using the bearer token read from `~/.claude/.credentials.json` (`claudeAiOauth.accessToken`). Yields the `five_hour` and `seven_day` `utilization` percentages — the same numbers `/usage` shows inside Claude Code — plus a `limits[]` array carrying a server-assigned `severity` per limit and the per-model weekly quotas (`kind: "weekly_scoped"`, model in `scope.model.display_name`). The dedicated `seven_day_opus`/`seven_day_sonnet` fields are null in practice; `limits[]` is the source for per-model numbers. Polled every **5–9 min with random jitter** (`OAUTH_BASE_SEC` ± `OAUTH_JITTER_SEC`). Last good response is persisted to `~/.cache/claude-usage/last-oauth.json` for warm starts.
 2. **ccusage path** (`_refreshCcusage`): spawns `/usr/local/bin/ccusage blocks --active --json --offline` as a subprocess and parses stdout. Yields token totals, burn rate, cost, and remaining minutes for the active 5-hour block. Polled every `CCUSAGE_INTERVAL_SEC` (60 s) and on menu open.
 
 The two timers, two cancellables, and two state objects are kept strictly separate inside `ClaudeUsageIndicator`. `_render()` is the only place they meet — it classifies each path independently (`_classifyOauth` → `fresh|stale|dead`, `_classifyCcusage` → `fresh|idle|dead`) and picks the top-bar emoji and dropdown text from the cross product. When editing render logic, preserve this split: do not couple the two paths' freshness or error states.
@@ -31,7 +31,7 @@ ROADMAP.md ("Things explicitly not in scope") forbids more aggressive polling an
 
 - The dropdown labels are forced into a monospace class (`claude-usage-mono`) and padded with `kv()` (`LABEL_WIDTH = 14`) so the Unicode progress bars in `fmtBar()` line up. Don't replace the padding with HTML/Pango — `St.Label` doesn't render either.
 - `fmtBar()` uses 1/8-block partial characters (`▏▎▍▌▋▊▉`) for sub-step resolution at `BAR_WIDTH = 10`.
-- The top-bar emoji set (`🟢 🟡 ⚪ ⚠️`) is meaningful, not decorative — see the table in README.md. `*` after a percentage means OAuth data is `stale` (older than 20 min) but not yet `dead`.
+- The top-bar emoji set (`🟢 🟡 🔴 ⚪ ⚠️`) is meaningful, not decorative — see the table in README.md. `*` after a percentage means OAuth data is `stale` (older than 20 min) but not yet `dead`. `🔴`/`🟡` from a `severity` in `limits[]` outrank the path-health emoji; `⚠️` stays reserved for both paths being dead.
 
 ## Common commands
 

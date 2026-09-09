@@ -112,6 +112,47 @@ function kv(label, value) {
     return label.padEnd(LABEL_WIDTH) + value;
 }
 
+// ---- limits[] : per-model quotas and server-side severity ----
+// The payload carries a `limits` array alongside the `five_hour`/`seven_day`
+// buckets. Entries of kind `weekly_scoped` are quotas that apply to one model
+// only (`scope.model.display_name`), and they can sit at 99% while the
+// all-model weekly number is still comfortable. Every entry also carries a
+// `severity` the server assigns, which is the only signal that says a limit
+// matters right now.
+const SEV_NORMAL   = 0;
+const SEV_WARNING  = 1;
+const SEV_CRITICAL = 2;
+const SEVERITY_RANK = {normal: SEV_NORMAL, warning: SEV_WARNING, critical: SEV_CRITICAL};
+
+function severityRank(severity) {
+    if (!severity || severity === 'normal') return SEV_NORMAL;
+    // An unrecognized severity still means the server flagged something, so it
+    // counts as a warning instead of being dropped on the floor.
+    return SEVERITY_RANK[severity] ?? SEV_WARNING;
+}
+
+// Per-model weekly limits, worst first, so the row that needs attention is the
+// one nearest the all-model week row.
+function scopedWeeklyLimits(data) {
+    const limits = Array.isArray(data?.limits) ? data.limits : [];
+    return limits
+        .filter(l => l?.kind === 'weekly_scoped' && l?.scope?.model?.display_name)
+        .sort((a, b) => (b.percent ?? 0) - (a.percent ?? 0));
+}
+
+// Model names have to fit the same padded column as "Session (5h):", leaving
+// one space before the value. Longer names are truncated rather than allowed to
+// push the bars out of alignment.
+const SCOPED_SUFFIX = ' (7d):';
+const SCOPED_NAME_MAX = LABEL_WIDTH - 1 - SCOPED_SUFFIX.length;
+
+function scopedLabel(name) {
+    const short = name.length > SCOPED_NAME_MAX
+        ? name.slice(0, SCOPED_NAME_MAX - 1) + '…'
+        : name;
+    return short + SCOPED_SUFFIX;
+}
+
 function logTag(msg) {
     log(`[claude-usage] ${msg}`);
 }
@@ -139,6 +180,14 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._sessionResetItem);
         this.menu.addMenuItem(this._weekItem);
         this.menu.addMenuItem(this._weekResetItem);
+
+        // Per-model weekly rows sit under the all-model week row. How many
+        // there are depends on the account, so they live in a section with a
+        // pool of rows that grows on demand and hides what it doesn't need.
+        this._scopedSection = new PopupMenu.PopupMenuSection();
+        this._scopedRows = [];
+        this.menu.addMenuItem(this._scopedSection);
+
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         // ccusage rows
@@ -329,7 +378,9 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                     this._oauthFailStreak = 0;
                     this._oauthInterval = OAUTH_BASE_SEC;
                     this._writeOauthCache(this._lastOauth);
-                    logTag(`OAuth ok: 5h=${data?.five_hour?.utilization} 7d=${data?.seven_day?.utilization}`);
+                    const scoped = scopedWeeklyLimits(data)
+                        .map(l => ` ${l.scope.model.display_name}=${l.percent}`).join('');
+                    logTag(`OAuth ok: 5h=${data?.five_hour?.utilization} 7d=${data?.seven_day?.utilization}${scoped}`);
                 } catch (e) {
                     this._oauthFailStreak++;
                     this._lastOauthError = {code: 200, message: `parse: ${e.message}`, at: Date.now()};
@@ -413,6 +464,37 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         return this._activeBlock() ? 'fresh' : 'idle';
     }
 
+    // The limits[] entry the server rates worst, or null when everything is
+    // normal. Drives the top-bar emoji and the extra top-bar percentage.
+    _worstLimit() {
+        const limits = Array.isArray(this._lastOauth?.limits) ? this._lastOauth.limits : [];
+        let worst = null;
+        let worstRank = SEV_NORMAL;
+        for (const limit of limits) {
+            const rank = severityRank(limit?.severity);
+            if (rank > worstRank) {
+                worstRank = rank;
+                worst = limit;
+            }
+        }
+        return worst;
+    }
+
+    // Row `i` of the scoped pool, creating it (and everything before it) if the
+    // pool hasn't grown that far yet.
+    _scopedRow(i) {
+        while (this._scopedRows.length <= i) {
+            const main  = new PopupMenu.PopupMenuItem('', {reactive: false});
+            const reset = new PopupMenu.PopupMenuItem('', {reactive: false});
+            main.label.add_style_class_name('claude-usage-mono');
+            reset.label.add_style_class_name('claude-usage-mono');
+            this._scopedSection.addMenuItem(main);
+            this._scopedSection.addMenuItem(reset);
+            this._scopedRows.push({main, reset});
+        }
+        return this._scopedRows[i];
+    }
+
     _render() {
         const oauthState = this._classifyOauth();
         const ccState    = this._classifyCcusage();
@@ -441,30 +523,52 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             }
         };
 
+        const oauthReason = this._lastOauthError?.message || 'no data';
+        const oauthAge = this._lastOauth ? fmtAgo(Date.now() - this._lastOauth.fetchedAt) : null;
+        const ageNote = oauthState === 'stale' ? `  (${oauthAge})` : '';
+
         if (oauthState === 'dead') {
-            const reason = this._lastOauthError?.message || 'no data';
             if (this._lastOauth) {
-                const age = fmtAgo(Date.now() - this._lastOauth.fetchedAt);
                 const five = this._lastOauth.five_hour;
                 const seven = this._lastOauth.seven_day;
                 this._sessionItem.label.set_text(
-                    kv('Session (5h):', `unavailable — ${reason} (last ${five ? fmtPct(five.utilization) : '—'}, ${age})`)
+                    kv('Session (5h):', `unavailable — ${oauthReason} (last ${five ? fmtPct(five.utilization) : '—'}, ${oauthAge})`)
                 );
                 this._weekItem.label.set_text(
-                    kv('Week (7d):', `unavailable — ${reason} (last ${seven ? fmtPct(seven.utilization) : '—'}, ${age})`)
+                    kv('Week (7d):', `unavailable — ${oauthReason} (last ${seven ? fmtPct(seven.utilization) : '—'}, ${oauthAge})`)
                 );
             } else {
-                this._sessionItem.label.set_text(kv('Session (5h):', `unavailable — ${reason}`));
-                this._weekItem.label.set_text(kv('Week (7d):', `unavailable — ${reason}`));
+                this._sessionItem.label.set_text(kv('Session (5h):', `unavailable — ${oauthReason}`));
+                this._weekItem.label.set_text(kv('Week (7d):', `unavailable — ${oauthReason}`));
             }
             this._sessionResetItem.visible = false;
             this._weekResetItem.visible = false;
         } else {
-            const ageNote = oauthState === 'stale'
-                ? `  (${fmtAgo(Date.now() - this._lastOauth.fetchedAt)})`
-                : '';
             setPctRow(this._sessionItem, this._sessionResetItem, 'Session (5h):', this._lastOauth.five_hour, ageNote);
             setPctRow(this._weekItem, this._weekResetItem, 'Week (7d):', this._lastOauth.seven_day, ageNote);
+        }
+
+        // ---- per-model weekly rows ----
+        // Fed by the same payload as the two rows above, so a dead OAuth path
+        // degrades these the same way rather than making them disappear.
+        const scoped = scopedWeeklyLimits(this._lastOauth);
+        scoped.forEach((limit, i) => {
+            const row = this._scopedRow(i);
+            const label = scopedLabel(limit.scope.model.display_name);
+            row.main.visible = true;
+            if (oauthState === 'dead') {
+                row.main.label.set_text(
+                    kv(label, `unavailable — ${oauthReason} (last ${fmtPct(limit.percent)}, ${oauthAge})`)
+                );
+                row.reset.visible = false;
+            } else {
+                setPctRow(row.main, row.reset, label,
+                          {utilization: limit.percent, resets_at: limit.resets_at}, ageNote);
+            }
+        });
+        for (let i = scoped.length; i < this._scopedRows.length; i++) {
+            this._scopedRows[i].main.visible = false;
+            this._scopedRows[i].reset.visible = false;
         }
 
         // ---- ccusage menu rows ----
@@ -493,8 +597,17 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     _buildTopBarText(oauthState, ccState) {
         if (oauthState === 'dead' && ccState === 'dead') return '⚠️ usage';
 
+        // A dead OAuth path has no trustworthy severity to report, so severity
+        // only speaks while the path is fresh or stale.
+        const worst = oauthState === 'dead' ? null : this._worstLimit();
+        const worstRank = severityRank(worst?.severity);
+
+        // Severity outranks path health: running out of quota is the more
+        // actionable fact than one of the two data sources being down.
         let emoji;
-        if (oauthState === 'dead' && ccState !== 'dead') emoji = '🟡';
+        if (worstRank >= SEV_CRITICAL) emoji = '🔴';
+        else if (worstRank >= SEV_WARNING) emoji = '🟡';
+        else if (oauthState === 'dead' && ccState !== 'dead') emoji = '🟡';
         else if (ccState === 'idle' && (!this._lastOauth || (this._lastOauth.five_hour?.utilization ?? 0) === 0)) emoji = '⚪';
         else emoji = '🟢';
 
@@ -503,6 +616,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             const star = oauthState === 'stale' ? '*' : '';
             parts.push(`${fmtPct(this._lastOauth.five_hour.utilization)}${star}`);
         }
+        // A per-model limit in trouble is invisible in the 5h number, so name
+        // it rather than leaving an unexplained red dot in the panel.
+        const worstModel = worst?.scope?.model?.display_name;
+        if (worstModel && worstRank >= SEV_WARNING) parts.push(`${worstModel} ${fmtPct(worst.percent)}`);
         if (ccState === 'fresh') {
             const a = this._activeBlock();
             parts.push(fmtTokens(a.totalTokens ?? 0));
@@ -543,6 +660,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             this._soup.abort();
             this._soup = null;
         }
+        // The rows are children of the menu, so super.destroy() disposes them;
+        // dropping the pool keeps this object from holding dead actors.
+        this._scopedRows = [];
+        this._scopedSection = null;
         super.destroy();
     }
 });

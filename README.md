@@ -13,6 +13,8 @@ breakdown.
                                    ↳ Tue 24 Jun 15:24    ← absolute reset time
   Week (7d):    [███▏░░░░░░]  38%  resets in 4d18h     (monospace, ASCII bars)
                                    ↳ Sat 28 Jun 06:00
+  Fable (7d):   [█████████▉]  99%  resets in 4d18h   ← per-model weekly limit
+                                   ↳ Sat 28 Jun 06:00
   ─────────────
   Tokens:       1.2M
   Burn:         16.5k tok/min
@@ -41,13 +43,38 @@ The two paths are independent: if the OAuth endpoint is unreachable the
 indicator drops the percentage and switches to a yellow `🟡` icon, but
 ccusage tokens keep updating.
 
+### Per-model weekly limits
+
+Some models have their own weekly quota on top of the all-model one. The
+OAuth response reports these in its `limits` array as `weekly_scoped`
+entries, each tagged with a model name. The dropdown gets one extra row per
+entry, under the `Week (7d):` row, sorted worst first. Accounts with no such
+quota simply see no extra rows.
+
+These matter because a per-model quota can be exhausted while the headline
+numbers still look fine: `Session (5h)` at 12% and `Week (7d)` at 38% tells
+you nothing about Fable sitting at 99%.
+
+### Top-bar emoji
+
+Each entry in `limits` carries a `severity` the server assigns. The worst
+severity across all of them sets the icon, and it outranks the freshness of
+the two data paths, since running out of quota is more actionable than one
+source being down. When the worst entry is a per-model limit, the top bar
+names it, because that percentage is invisible in the session number.
+
 | Top-bar emoji | Meaning |
 |---|---|
-| `🟢` | Both sources fresh. Top bar shows percentage. |
+| `🟢` | Both sources fresh, every limit normal. Top bar shows percentage. |
 | `🟢 12%*` | OAuth response is older than 20 min; ccusage still fresh. |
 | `🟡` | OAuth endpoint dead/unreachable; ccusage still working. |
+| `🟡 12% · Fable 80%` | A limit is at `warning` severity. |
+| `🔴 12% · Fable 99%` | A limit is at `critical` severity. |
 | `⚪` | No active block and 0% session usage. |
 | `⚠️` | Both sources broken. |
+
+An unrecognized severity counts as `warning` rather than being ignored, so a
+new value the server starts sending still reaches the panel.
 
 [ccusage]: https://github.com/ryoppippi/ccusage
 
