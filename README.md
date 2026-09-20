@@ -15,6 +15,7 @@ breakdown.
                                    ↳ Sat 28 Jun 06:00
   Fable (7d):   [█████████▉]  99%  resets in 4d18h   ← per-model weekly limit
                                    ↳ Sat 28 Jun 06:00
+  Spend (mo):   [░░░░░░░░░░]   0%  €0.00 of €20.00   ← extra-usage spend cap
   ─────────────
   Tokens:       1.2M
   Burn:         16.5k tok/min
@@ -54,6 +55,14 @@ quota simply see no extra rows.
 These matter because a per-model quota can be exhausted while the headline
 numbers still look fine: `Session (5h)` at 12% and `Week (7d)` at 38% tells
 you nothing about Fable sitting at 99%.
+
+### Monthly spend
+
+Accounts with extra usage enabled can spend money past their plan limits, up to a monthly cap. The OAuth response reports this in its `spend` object, and the dropdown shows it as a `Spend (mo):` row under the weekly rows: percentage of the cap used, then the two amounts.
+
+Amounts arrive as integer minor units plus an exponent, so `{"amount_minor": 2000, "exponent": 2}` renders as `20.00`. The currency comes from the same object; EUR, USD, GBP and JPY get a symbol, anything else gets the ISO code after the number (`8.00 SEK`).
+
+The row has no absolute-reset line, because a monthly cap is not a quota that resets on the clock the way the 5h and 7d buckets do. Accounts with no cap have no `spend` object, and then there is no row at all. When extra usage is switched off, the row reads `off` with the server's reason in parentheses instead of a bar.
 
 ### Top-bar emoji
 

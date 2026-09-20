@@ -153,6 +153,20 @@ function scopedLabel(name) {
     return short + SCOPED_SUFFIX;
 }
 
+// ---- spend : the monthly extra-usage cap ----
+// Money spent past the plan limits. Amounts arrive as integer minor units plus
+// an exponent, so 2000 with exponent 2 is 20.00. Accounts without the cap carry
+// no `spend` object at all.
+const CURRENCY_SYMBOL = {EUR: '€', USD: '$', GBP: '£', JPY: '¥'};
+
+function fmtMoney(money) {
+    if (!money || !Number.isFinite(money.amount_minor)) return '—';
+    const exponent = Number.isFinite(money.exponent) ? money.exponent : 2;
+    const amount = (money.amount_minor / 10 ** exponent).toFixed(exponent);
+    const symbol = CURRENCY_SYMBOL[money.currency];
+    return symbol ? `${symbol}${amount}` : `${amount} ${money.currency ?? ''}`.trim();
+}
+
 function logTag(msg) {
     log(`[claude-usage] ${msg}`);
 }
@@ -188,6 +202,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._scopedRows = [];
         this.menu.addMenuItem(this._scopedSection);
 
+        // A monthly money cap, not a quota that resets on a clock, so this row
+        // gets no absolute-reset sub-row.
+        this._spendItem = new PopupMenu.PopupMenuItem('Spend (mo):', {reactive: false});
+        this.menu.addMenuItem(this._spendItem);
+
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         // ccusage rows
@@ -204,6 +223,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         // Monospace the inner labels so the progress bar and column labels line up.
         for (const item of [this._sessionItem, this._sessionResetItem,
                             this._weekItem, this._weekResetItem,
+                            this._spendItem,
                             this._tokensItem, this._burnItem,
                             this._costItem, this._endsItem]) {
             item.label.add_style_class_name('claude-usage-mono');
@@ -569,6 +589,28 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         for (let i = scoped.length; i < this._scopedRows.length; i++) {
             this._scopedRows[i].main.visible = false;
             this._scopedRows[i].reset.visible = false;
+        }
+
+        // ---- monthly spend row ----
+        const spend = this._lastOauth?.spend;
+        this._spendItem.visible = !!spend;
+        if (spend) {
+            const used = fmtMoney(spend.used);
+            const limit = fmtMoney(spend.limit ?? spend.cap?.money);
+            if (oauthState === 'dead') {
+                this._spendItem.label.set_text(
+                    kv('Spend (mo):', `unavailable — ${oauthReason} (last ${used} of ${limit}, ${oauthAge})`)
+                );
+            } else if (spend.enabled === false) {
+                const why = spend.disabled_reason ? ` (${spend.disabled_reason})` : '';
+                this._spendItem.label.set_text(kv('Spend (mo):', `off${why}`));
+            } else {
+                const bar = fmtBar(spend.percent);
+                const pct = fmtPct(spend.percent).padStart(4);
+                this._spendItem.label.set_text(
+                    kv('Spend (mo):', `${bar} ${pct}  ${used} of ${limit}${ageNote}`)
+                );
+            }
         }
 
         // ---- ccusage menu rows ----
