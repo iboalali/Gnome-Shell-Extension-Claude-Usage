@@ -44,7 +44,7 @@ gnome-extensions disable claude-usage@iboalali.github.io
 
 > ⚠️ On Wayland, `disable`/`enable` only toggle extension **state** — they do **not** load edited
 > `extension.js`. To actually run new code you must restart `gnome-shell` (log out/in) or use the
-> nested Shell. See "Live iteration loop" below — this trap eats hours if you don't know it.
+> devkit Shell. See "Live iteration loop" below — this trap eats hours if you don't know it.
 
 > ⚠️ The install is a **symlink**, so moving or renaming this checkout leaves it dangling — and
 > GNOME Shell skips broken links at login **silently**. `gnome-extensions info|enable <uuid>` then
@@ -71,20 +71,21 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 `Alt+F2 r` (the in-place Shell restart) is X11-only, so on Wayland the only two ways to actually load new code are:
 
 1. **Log out and back in** — full `gnome-shell` restart; the definitive test, against the real panel.
-2. **Nested Shell** — spawns a fresh `gnome-shell` that reads `extension.js` from disk:
+2. **Devkit Shell**: spawns a fresh `gnome-shell` that reads `extension.js` from disk and shows it in a viewer window on your desktop:
 
 ```sh
-# Terminal 1 — tail Shell + extension logs
-journalctl -f -o cat /usr/bin/gnome-shell | grep -i 'claude-usage\|claude'
-
-# Terminal 2 — nested Shell (Ctrl+C and ↑+Enter to reload after edits)
-WAYLAND_DISPLAY=wayland-0 MUTTER_DEBUG_DUMMY_MODE_SPECS=1920x1080 \
-    dbus-run-session -- gnome-shell --nested --wayland
+# Ctrl+C and ↑+Enter to reload after edits
+MUTTER_DEBUG_DUMMY_MODE_SPECS=1920x1080 \
+    dbus-run-session -- gnome-shell --devkit --wayland 2>&1 | grep -i 'claude'
 ```
 
-`WAYLAND_DISPLAY` must be set or the nested mutter has no host compositor to nest into, falls back to X11, and dies with `Unable to open display ':0'` / `Invalid MIT-MAGIC-COOKIE-1 key`. Use the actual socket name from `ls "$XDG_RUNTIME_DIR"/wayland-*` (usually `wayland-0`).
+The viewer is `/usr/libexec/mutter-devkit` from the `mutter-dev-bin` package (`sudo apt install mutter-dev-bin`). Without it the Shell still starts but runs headless, and the log says `Failed to launch devkit: Failed to execute child process "/usr/libexec/mutter-devkit"`. The devkit Shell picks the next free Wayland socket (`wayland-1`) on its own, so it needs no `WAYLAND_DISPLAY`.
 
-`MUTTER_DEBUG_DUMMY_MODE_SPECS` matters: without it the virtual monitor is ~1024×768 and the panel truncates the extension label to `…`, hiding regressions. The nested shell **shares dconf with the main session**, so don't `gnome-extensions disable/enable` from inside it — just kill and relaunch the process. Font metrics differ slightly from the real panel; verify UI tweaks with a real logout/login before calling them done.
+Its log goes to the terminal that launched it, not to the journal, so `journalctl -f /usr/bin/gnome-shell` shows only the main session's Shell. Look for the `[claude-usage]` lines in the launching terminal.
+
+`--devkit` replaced `--nested` in GNOME 49. On Shell 45-48 the equivalent is `WAYLAND_DISPLAY=wayland-0 MUTTER_DEBUG_DUMMY_MODE_SPECS=1920x1080 dbus-run-session -- gnome-shell --nested --wayland`. There `WAYLAND_DISPLAY` must be set (the actual socket from `ls "$XDG_RUNTIME_DIR"/wayland-*`), or the nested mutter has no host compositor, falls back to X11 and dies with `Unable to open display ':0'` / `Invalid MIT-MAGIC-COOKIE-1 key`.
+
+`MUTTER_DEBUG_DUMMY_MODE_SPECS` matters: without it the virtual monitor is about 1024×768 and the panel truncates the extension label to `…`, hiding regressions. The test Shell **shares dconf with the main session**, so don't `gnome-extensions disable/enable` from inside it. Kill and relaunch the process instead. Font metrics differ slightly from the real panel, so verify UI tweaks with a real logout/login before calling them done.
 
 `logTag()` writes to the GNOME Shell journal as `[claude-usage] …`. Use it liberally during debugging; the log line in `_scheduleOauthTick` ("next OAuth tick in Xs") is load-bearing for diagnosing rate-limit problems.
 
