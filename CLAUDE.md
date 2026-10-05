@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A GNOME Shell extension (UUID `claude-usage@iboalali.github.io`, ESM, Shell 45/46/47) that puts a live Claude Code usage indicator in the top bar. The entire extension is one file: `extension.js`. There is no build step and no package manager — `metadata.json` + `extension.js` + `stylesheet.css` is the whole shipping artifact.
+A GNOME Shell extension (UUID `claude-usage@iboalali.github.io`, ESM, Shell 45-50) that puts a live Claude Code usage indicator in the top bar. The entire extension is one file: `extension.js`. There is no build step and no package manager — `metadata.json` + `extension.js` + `stylesheet.css` is the whole shipping artifact.
 
 ## Architecture: two independent data paths
 

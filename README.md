@@ -89,7 +89,7 @@ new value the server starts sending still reaches the panel.
 
 ## Requirements
 
-- **GNOME Shell 45, 46, or 47** (uses the ESM module extension API).
+- **GNOME Shell 45 to 50** (uses the ESM module extension API).
 - **Node.js ≥ 20.19.4** — required by ccusage 18.x.
 - **`ccusage`** installed globally at `/usr/local/bin/ccusage`:
   ```sh
