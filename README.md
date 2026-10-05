@@ -146,59 +146,51 @@ No GUI yet (see [ROADMAP.md](ROADMAP.md)). Tweak constants at the top of
 
 ## Development
 
-GNOME Shell on Wayland does **not** support live extension reloads
-(`Alt+F2 r` is X11-only). For a fast iteration loop, run a **nested
-shell** in a window — it boots in ~2 seconds and picks up your latest
-`extension.js` on every restart.
+GNOME Shell on Wayland does **not** support live extension reloads (`Alt+F2 r` is X11-only). For a fast iteration loop, run a **devkit shell**: a second GNOME Shell shown in a window. It boots in about 2 seconds and picks up your latest `extension.js` on every restart.
 
-### Live iteration loop (nested shell)
+### Live iteration loop (devkit shell)
 
-Open two terminals:
-
-**Terminal 1** — tail JS errors and the extension's own log lines so
-crashes are visible the moment they happen:
+The devkit shell's window is drawn by `/usr/libexec/mutter-devkit`, which comes in the `mutter-dev-bin` package:
 
 ```sh
-journalctl -f -o cat /usr/bin/gnome-shell | grep -i 'claude-usage\|claude'
+sudo apt install mutter-dev-bin
 ```
 
-**Terminal 2** — the dev shell:
+Without it the shell still starts but runs headless, and its log says `Failed to launch devkit: Failed to execute child process "/usr/libexec/mutter-devkit"`.
+
+Launch the dev shell. Its log goes to this terminal, not to the journal, so filter it here to see JS errors and the extension's own log lines:
 
 ```sh
-MUTTER_DEBUG_DUMMY_MODE_SPECS=1920x1080 dbus-run-session -- gnome-shell --nested --wayland
+MUTTER_DEBUG_DUMMY_MODE_SPECS=1920x1080 \
+    dbus-run-session -- gnome-shell --devkit --wayland 2>&1 | grep -i 'claude'
 ```
 
-The `MUTTER_DEBUG_DUMMY_MODE_SPECS` env var sizes the nested shell's
-virtual monitor — without it the default is ~1024×768 and the panel
-truncates this extension's label to `…`. Set it to match your real
-monitor (or larger). Multi-monitor testing: chain values, e.g.
-`1920x1080,1280x720`. To simulate more monitors set
-`MUTTER_DEBUG_NUM_DUMMY_MONITORS=2`.
+The `MUTTER_DEBUG_DUMMY_MODE_SPECS` env var sizes the dev shell's virtual monitor. Without it the default is about 1024×768 and the panel truncates this extension's label to `…`. Set it to match your real monitor (or larger). Multi-monitor testing: chain values, e.g. `1920x1080,1280x720`. To simulate more monitors set `MUTTER_DEBUG_NUM_DUMMY_MONITORS=2`.
 
-This opens a small GNOME Shell *inside* a window. The extension
-auto-loads (it's already enabled in your main session's dconf), so
-its top-bar item appears within ~60 s. To pick up an edit:
+The extension auto-loads (it's already enabled in your main session's dconf), and its top-bar item appears as soon as the shell is up. To pick up an edit:
 
-1. Save `extension.js` (the symlink means it's already in the
-   extensions dir — no copy step).
-2. Focus terminal 2, `Ctrl+C` to kill the nested shell.
-3. ↑ + Enter to relaunch — fresh module imports, edits are live.
+1. Save `extension.js`. The symlink means it's already in the extensions dir, so there is no copy step.
+2. `Ctrl+C` in the terminal to kill the dev shell.
+3. ↑ + Enter to relaunch. The fresh shell imports the module again, so your edits are live.
+
+**GNOME Shell 45-48** has no `--devkit`. Use the older nested mode instead, with `WAYLAND_DISPLAY` set to your session's socket (from `ls "$XDG_RUNTIME_DIR"/wayland-*`, usually `wayland-0`):
+
+```sh
+WAYLAND_DISPLAY=wayland-0 MUTTER_DEBUG_DUMMY_MODE_SPECS=1920x1080 \
+    dbus-run-session -- gnome-shell --nested --wayland
+```
+
+Without `WAYLAND_DISPLAY` the nested shell has no compositor to open its window in, falls back to X11 and dies with `Unable to open display ':0'`.
 
 Caveats:
 
-- The nested shell **shares dconf with your main session**, so toggling
-  extensions inside it affects the main session too. Don't `gnome-extensions
-  disable/enable` from inside the nested shell — just restart the process.
-- The nested window renders smaller and font metrics differ slightly from
-  the real panel. Do a real logout/login before calling a UI tweak done.
+- The dev shell **shares dconf with your main session**, so toggling extensions inside it affects the main session too. Don't `gnome-extensions disable/enable` from inside the dev shell. Restart the process instead.
+- Font metrics differ slightly from the real panel. Do a real logout/login before calling a UI tweak done.
 
-### Alternatives if the nested shell isn't an option
+### Alternatives if the devkit shell isn't an option
 
-- **Logout / login** — slow (~60 s) but always works.
-- **Switch to "Ubuntu on Xorg"** at the GDM login screen (gear icon
-  next to the Login button). Under X11, `Alt+F2 → r` restarts the
-  shell in place, giving you the same iteration loop without a nested
-  window. Switch back to Wayland once you're done.
+- **Logout / login**: slow (about 60 s) but always works.
+- **Switch to "Ubuntu on Xorg"** at the GDM login screen (gear icon next to the Login button), on GNOME 48 and older, which still ship it. Under X11, `Alt+F2 → r` restarts the shell in place, giving you the same iteration loop without a second shell. Switch back to Wayland once you're done.
 
 ### Sanity checks without launching the shell
 
