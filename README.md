@@ -38,7 +38,7 @@ The indicator merges two independent data sources:
    `~/.cache/claude-usage/last-oauth.json` for warm starts.
 2. **Local token totals** — burn rate, cost, time-remaining for the active
    5-hour block, parsed from your `~/.claude/projects/*.jsonl` transcripts
-   via [`ccusage`][ccusage]. Polled every **60 s** and on menu open.
+   via [`ccusage`][ccusage]. Polled every **5 min** and on menu open.
 
 The two paths are independent: if the OAuth endpoint is unreachable the
 indicator drops the percentage and switches to a yellow `🟡` icon, but
@@ -134,7 +134,7 @@ No GUI yet (see [ROADMAP.md](ROADMAP.md)). Tweak constants at the top of
 
 | Constant                  | Default                        | What it does                                           |
 |---------------------------|--------------------------------|--------------------------------------------------------|
-| `CCUSAGE_INTERVAL_SEC`    | `60`                           | ccusage poll interval                                  |
+| `CCUSAGE_INTERVAL_SEC`    | `300`                          | ccusage poll interval                                  |
 | `CCUSAGE`                 | `/usr/local/bin/ccusage`       | Path to the ccusage binary                             |
 | `CCUSAGE_ARGS`            | `blocks --active --json --offline` | ccusage invocation flags                          |
 | `OAUTH_BASE_SEC`          | `420` (7 min)                  | Base interval between OAuth fetches                    |

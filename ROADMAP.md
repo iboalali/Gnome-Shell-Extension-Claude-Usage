@@ -11,7 +11,7 @@ GNOME Extensions preferences pane, backed by a GSettings schema.
 
 What to expose:
 
-- ccusage refresh interval (default 60 s).
+- ccusage refresh interval (default 300 s).
 - OAuth base interval and jitter range (defaults 420 ± 120 s).
 - Toggle: include `seven_day_sonnet` row in the dropdown.
 - Toggle: show cost in USD vs hide it (some users prefer tokens-only).

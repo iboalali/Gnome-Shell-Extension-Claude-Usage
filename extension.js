@@ -10,8 +10,10 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-// ---- ccusage path (60s polling) ----
-const CCUSAGE_INTERVAL_SEC = 60;
+// ---- ccusage path (5 min polling) ----
+// Each run rescans every transcript under ~/.claude/projects, which costs tens of
+// CPU-seconds on a large history, so keep this interval long.
+const CCUSAGE_INTERVAL_SEC = 300;
 const CCUSAGE = '/usr/local/bin/ccusage';
 const CCUSAGE_ARGS = ['blocks', '--active', '--json', '--offline'];
 const TERMINAL_CMD = ['/usr/bin/gnome-terminal', '--', 'bash', '-c',
@@ -254,6 +256,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._ccusageTimerId = 0;
         this._oauthTimerId = 0;
         this._ccusageCancellable = null;
+        this._ccusageProc = null;
         this._oauthCancellable = null;
 
         this._soup = new Soup.Session({user_agent: 'claude-usage-gnome/0.2'});
@@ -280,7 +283,9 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     }
 
     _refreshCcusage() {
-        if (this._ccusageCancellable) this._ccusageCancellable.cancel();
+        // A run already in flight returns fresh data soon; starting another
+        // would scan the whole transcript history twice in parallel.
+        if (this._ccusageProc) return;
         this._ccusageCancellable = new Gio.Cancellable();
 
         let proc;
@@ -295,8 +300,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             this._render();
             return;
         }
+        this._ccusageProc = proc;
 
         proc.communicate_utf8_async(null, this._ccusageCancellable, (p, res) => {
+            if (this._ccusageProc === p) this._ccusageProc = null;
             try {
                 const [, stdout] = p.communicate_utf8_finish(res);
                 if (!p.get_successful()) {
@@ -693,6 +700,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         if (this._ccusageCancellable) {
             this._ccusageCancellable.cancel();
             this._ccusageCancellable = null;
+        }
+        if (this._ccusageProc) {
+            this._ccusageProc.force_exit();
+            this._ccusageProc = null;
         }
         if (this._oauthCancellable) {
             this._oauthCancellable.cancel();
