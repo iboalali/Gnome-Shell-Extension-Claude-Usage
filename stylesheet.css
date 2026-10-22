@@ -1,7 +1,30 @@
-.claude-usage-label {
-  font-feature-settings: "tnum";
-}
+/* Top bar */
+.claude-usage-pill { spacing: 6px; }
+.claude-usage-label { font-feature-settings: "tnum"; }
+.claude-usage-block-letter { color: rgba(255, 255, 255, 0.6); }
+.claude-usage-meters { spacing: 3px; }
+.claude-usage-meter-row { spacing: 4px; }
+.claude-usage-meter-letter { font-size: 7.5pt; font-weight: bold; color: rgba(255, 255, 255, 0.7); }
+.claude-usage-meter { width: 40px; height: 4px; border-radius: 2px; background-color: rgba(255, 255, 255, 0.25); }
+.claude-usage-meter-dead { background-color: rgba(224, 27, 36, 0.55); }
+.claude-usage-meter-fill { height: 4px; border-radius: 2px; }
 
-.claude-usage-mono {
-  font-family: "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
-}
+/* Severity, as the server reports it */
+.claude-usage-sev-normal { background-color: #26a269; }
+.claude-usage-sev-warning { background-color: #e5a50a; }
+.claude-usage-sev-critical { background-color: #e01b24; }
+
+/* Dropdown table: label column, then one fixed-width column per account */
+.claude-usage-table { padding: 6px 20px; spacing: 8px; }
+.claude-usage-row { spacing: 12px; }
+.claude-usage-head { padding-bottom: 2px; }
+.claude-usage-row-label { width: 104px; color: #8b8a8f; }
+.claude-usage-cell { width: 132px; spacing: 8px; }
+.claude-usage-col-name { font-weight: bold; }
+.claude-usage-col-sub { font-size: 8pt; color: #8b8a8f; }
+.claude-usage-bar { width: 80px; height: 8px; border-radius: 4px; background-color: rgba(128, 128, 128, 0.22); }
+.claude-usage-bar-fill { height: 8px; border-radius: 4px; }
+.claude-usage-pct { width: 40px; text-align: right; font-weight: bold; font-feature-settings: "tnum"; }
+.claude-usage-value { font-feature-settings: "tnum"; }
+.claude-usage-dim { color: #8b8a8f; font-feature-settings: "tnum"; }
+.claude-usage-divider { height: 1px; margin: 2px 0; background-color: rgba(128, 128, 128, 0.25); }

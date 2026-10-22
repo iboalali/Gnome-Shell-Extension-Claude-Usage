@@ -4,20 +4,20 @@ Guidance for coding agents working in this repository. `CLAUDE.md` points here.
 
 ## What this is
 
-A GNOME Shell extension (UUID `claude-usage@iboalali.github.io`, ESM, Shell 45-50) that puts a live Claude Code usage indicator in the top bar. The entire extension is one file: `extension.js`. There is no build step and no package manager: `metadata.json` + `extension.js` + `stylesheet.css` is the whole shipping artifact.
+A GNOME Shell extension (UUID `claude-usage@iboalali.github.io`, ESM, Shell 45-50) that puts a live Claude Code usage indicator in the top bar, for one or more Claude accounts. The entire extension is one file: `extension.js`. There is no build step and no package manager: `metadata.json` + `extension.js` + `stylesheet.css` is the whole shipping artifact.
 
-## Architecture: two independent data paths
+## Architecture: accounts, each with two independent data paths
 
-The indicator deliberately merges two unrelated sources so that one going down doesn't blank the panel:
+An account is one Claude Code config directory, listed in `ACCOUNTS` (default `~/.claude` as Work and `~/.claude-private` as Private; missing directories are skipped). Each `Account` object owns both data paths for its directory. The indicator merges two unrelated sources per account so that one going down doesn't blank the panel:
 
-1. **OAuth path** (`_refreshOauth`): GETs `https://api.anthropic.com/api/oauth/usage` using the bearer token read from `~/.claude/.credentials.json` (`claudeAiOauth.accessToken`). Yields the `five_hour` and `seven_day` `utilization` percentages (the same numbers `/usage` shows inside Claude Code), plus a `limits[]` array carrying a server-assigned `severity` per limit and the per-model weekly quotas (`kind: "weekly_scoped"`, model in `scope.model.display_name`). The dedicated `seven_day_opus`/`seven_day_sonnet` fields are null in practice; `limits[]` is the source for per-model numbers. Polled every **5-9 min with random jitter** (`OAUTH_BASE_SEC` ± `OAUTH_JITTER_SEC`). Last good response is persisted to `~/.cache/claude-usage/last-oauth.json` for warm starts.
-2. **ccusage path** (`_refreshCcusage`): spawns `/usr/local/bin/ccusage blocks --active --json --offline` as a subprocess and parses stdout. Yields token totals, burn rate, cost, and remaining minutes for the active 5-hour block. Polled every `CCUSAGE_INTERVAL_SEC` (300 s) and on menu open, never more than one run at a time. Each run rescans the whole transcript history (tens of CPU-seconds and close to 1 GB on a large history), which is why the interval is long.
+1. **OAuth path** (`_refreshOauth`): GETs `https://api.anthropic.com/api/oauth/usage` using the bearer token read from `<configDir>/.credentials.json` (`claudeAiOauth.accessToken`; `subscriptionType` and `rateLimitTier` from the same object become the plan in the column header). Yields the `five_hour` and `seven_day` `utilization` percentages (the same numbers `/usage` shows inside Claude Code), plus a `limits[]` array carrying a server-assigned `severity` per limit and the per-model weekly quotas (`kind: "weekly_scoped"`, model in `scope.model.display_name`). The dedicated `seven_day_opus`/`seven_day_sonnet` fields are null in practice; `limits[]` is the source for per-model numbers. Polled every **5-9 min with random jitter** (`OAUTH_BASE_SEC` ± `OAUTH_JITTER_SEC`). Last good response is persisted to `~/.cache/claude-usage/<cacheFile>` for warm starts (Work keeps the original `last-oauth.json`).
+2. **ccusage path** (`refreshCcusage`): spawns `/usr/local/bin/ccusage blocks --active --json --offline` with `CLAUDE_CONFIG_DIR=<configDir>`, so it reads only that account's transcripts, and parses stdout. Yields token totals, burn rate, cost, and remaining minutes for the active 5-hour block. Checked every `CCUSAGE_INTERVAL_SEC` (300 s) and on menu open, never more than one run at a time. Each run rescans the whole transcript history (about 70 CPU-seconds and close to 1 GB on a 3.7 GB history), so a check first runs `find` (`TRANSCRIPT_CHECK_CMD`) and skips ccusage unless a `.jsonl` changed since the last run started. The check is bypassed by "Refresh now", by an error or missing data, and by an active block whose `endTime` has passed. "Ends in" is computed from the block's `endTime`, so it keeps counting down across skipped runs.
 
-The two timers, two cancellables, and two state objects are kept strictly separate inside `ClaudeUsageIndicator`. `_render()` is the only place they meet. It classifies each path independently (`_classifyOauth` → `fresh|stale|dead`, `_classifyCcusage` → `fresh|idle|dead`) and picks the top-bar emoji and dropdown text from the cross product. When editing render logic, preserve this split: do not couple the two paths' freshness or error states.
+Inside each `Account`, the two timers, two cancellables, and two state objects are kept strictly separate, and accounts share nothing but the `Soup.Session`. `ClaudeUsageIndicator._render()` is the only place paths and accounts meet. It classifies each path of each account independently (`classifyOauth` → `fresh|stale|dead`, `classifyCcusage` → `fresh|idle|dead`) and builds the top-bar meters and the dropdown table from that. When editing render logic, preserve this split: do not couple the two paths' freshness or error states, or one account's state to another's.
 
 ## OAuth endpoint constraints: do not relax these without thinking hard
 
-The OAuth endpoint is **undocumented** and rate-limited. The current cadence and backoff exist to stay quiet:
+The OAuth endpoint is **undocumented** and rate-limited. The current cadence and backoff exist to stay quiet. They apply per account, since each account polls with its own token:
 
 - 5-9 min jittered polling. Never tighten it.
 - 429 → exponential backoff up to `OAUTH_BACKOFF_MAX_SEC` (30 min).
@@ -29,9 +29,12 @@ ROADMAP.md ("Things explicitly not in scope") forbids more aggressive polling an
 
 ## Rendering details that look like bugs but aren't
 
-- The dropdown labels are forced into a monospace class (`claude-usage-mono`) and padded with `kv()` (`LABEL_WIDTH = 14`) so the Unicode progress bars in `fmtBar()` line up. Don't replace the padding with HTML/Pango: `St.Label` doesn't render either.
-- `fmtBar()` uses 1/8-block partial characters (`▏▎▍▌▋▊▉`) for sub-step resolution at `BAR_WIDTH = 10`.
-- The top-bar emoji set (`🟢 🟡 🔴 ⚪ ⚠️`) is meaningful, not decorative. See the table in README.md. `*` after a percentage means OAuth data is `stale` (older than 20 min) but not yet `dead`. `🔴`/`🟡` from a `severity` in `limits[]` outrank the path-health emoji; `⚠️` stays reserved for both paths being dead.
+- The dropdown is a table of St widgets, rebuilt on every render: a fixed-width label column (`.claude-usage-row-label`), then one fixed-width column per account (`.claude-usage-cell`). Alignment comes from those CSS widths, not from padding text, so it holds in any font.
+- A bar is a track `St.Widget` with a fill `St.Widget` inside whose CSS width is set in code as a share of the track. `METER_PX` and `BAR_PX` in `extension.js` must match the track widths in `stylesheet.css`. Non-zero values get at least 2px so 1% stays visible.
+- Bar colors come only from the server's `severity` (`.claude-usage-sev-normal|warning|critical`), never from the percentage: a `normal` limit at 90% is green. A top-bar meter shows only the account's all-model weekly limit (`seven_day`, severity from the `weekly_all` entry); session and per-model limits appear in the table only. See the table in README.md.
+- Stale OAuth data fades the fill (`opacity`), dead OAuth empties the meter and tints its track red, and `⚠️ usage` is reserved for every path of every account being dead.
+- St CSS rejects negative margins: a `margin-top: -6px` gave the menu an infinite height and it never appeared. Use spacing on the parent box instead.
+- `ClaudeUsageIndicator` wraps a `PanelMenu.Button` instead of subclassing it. A GObject subclass registers a GType named after the extension, and loading the module a second time in the same Shell (the hot-reload loader) fails with "Type name ... is already registered".
 
 ## Common commands
 
@@ -83,7 +86,7 @@ Its log goes to the terminal that launched it, not to the journal, so `journalct
 
 ## Lifecycle and cleanup
 
-`ClaudeUsageIndicator.destroy()` must release: both `GLib.timeout_add_seconds` IDs, both `Gio.Cancellable`s (stop waiting on in-flight ccusage output and cancel the OAuth Soup request), the running ccusage subprocess (`force_exit()`, since canceling only stops the wait and leaves the process running), and the `Soup.Session` (`abort()`). The `disable()` half of the GNOME Shell extension lifecycle calls this. Leaks here cause "extension is unhealthy" errors on Shell restart. When adding any new timer, subprocess, or async I/O, wire it through the same pattern.
+`Account.destroy()` must release, for its account: both `GLib.timeout_add_seconds` IDs, both `Gio.Cancellable`s (stop waiting on in-flight ccusage output and cancel the OAuth Soup request), and the running ccusage or `find` subprocess (`force_exit()`, since canceling only stops the wait and leaves the process running). `ClaudeUsageIndicator.destroy()` calls it for every account, then aborts the shared `Soup.Session` and destroys the button. The `disable()` half of the GNOME Shell extension lifecycle calls this. Leaks here cause "extension is unhealthy" errors on Shell restart. When adding any new timer, subprocess, or async I/O, wire it through the same pattern.
 
 ## Where to tweak behavior
 

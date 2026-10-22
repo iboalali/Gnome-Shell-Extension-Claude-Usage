@@ -1,89 +1,81 @@
 # Claude Usage — GNOME Shell Extension
 
-A live indicator in the GNOME top bar for your **Claude Code** usage.
-Shows the same session and weekly percentages that `/usage` inside Claude
-Code shows, alongside locally-computed token totals and the time remaining
-in the active 5-hour billing window. Click for a dropdown with the full
-breakdown.
+A live indicator in the GNOME top bar for your **Claude Code** usage, across one or more Claude accounts. It shows the same session and weekly percentages that `/usage` inside Claude Code shows, alongside locally computed token totals and the time left in the active 5-hour block.
+
+The top bar has one small meter per account, then the active block:
 
 ```
-🟢 12% · 1.2M · 3h12m            ← top bar (session% · tokens · time-left)
-
-  Session (5h): [█▏░░░░░░░░]  12%  resets in 3h12m   ← click → dropdown
-                                   ↳ Tue 24 Jun 15:24    ← absolute reset time
-  Week (7d):    [███▏░░░░░░]  38%  resets in 4d18h     (monospace, ASCII bars)
-                                   ↳ Sat 28 Jun 06:00
-  Fable (7d):   [█████████▉]  99%  resets in 4d18h   ← per-model weekly limit
-                                   ↳ Sat 28 Jun 06:00
-  Spend (mo):   [░░░░░░░░░░]   0%  €0.00 of €20.00   ← extra-usage spend cap
-  ─────────────
-  Tokens:       1.2M
-  Burn:         16.5k tok/min
-  Cost:         $4.20
-  Ends in:      3h12m
-  ─────────────
-  Open ccusage in terminal
-  Refresh now
+W ▬▬▬▬▬▬▭▭   W 2.32M · 4h47m      ← meter per account, then tokens · time left
+P ▬▭▭▭▭▭▭▭                          of the block in use (W = Work, P = Private)
 ```
+
+Click it for a table with one column per account:
+
+```
+                 Work                 Private
+Session          ▬▭▭▭▭▭▭▭   13%       ▭▭▭▭▭▭▭▭    0%
+Week             ▬▬▬▬▬▬▭▭   78%       ▬▭▭▭▭▭▭▭    7%
+Fable week       ▭▭▭▭▭▭▭▭    0%       —
+Spend            ▭▭▭▭▭▭▭▭    0%       off
+                 €0.00 of €0.00
+Session resets   4h04m                not started
+Week resets      Sat 16:59            Tue 11:59
+───────────────────────────────────────────────
+Tokens           2.32M                no active block
+Burn             517k / min           —
+Ends in          4h47m                —
+───────────────────────────────────────────────
+Open ccusage in terminal
+Refresh now
+```
+
+The rows are St widgets in fixed-width columns, so the bars line up in any font.
 
 ## How it works
 
 The indicator merges two independent data sources:
 
-1. **OAuth percentages** — the authoritative session and weekly utilization
-   numbers, fetched from `https://api.anthropic.com/api/oauth/usage` using
-   the OAuth token Claude Code already maintains in
-   `~/.claude/.credentials.json`. Polled every **5–9 min with random jitter**
-   to stay well under the endpoint's rate limit. Last response is cached at
-   `~/.cache/claude-usage/last-oauth.json` for warm starts.
-2. **Local token totals** — burn rate, cost, time-remaining for the active
-   5-hour block, parsed from your `~/.claude/projects/*.jsonl` transcripts
-   via [`ccusage`][ccusage]. Polled every **5 min** and on menu open.
+1. **OAuth percentages**: the authoritative session and weekly utilization numbers, fetched from `https://api.anthropic.com/api/oauth/usage` using the OAuth token Claude Code already maintains in `<config dir>/.credentials.json`. Polled every **5-9 min with random jitter** to stay well under the endpoint's rate limit. The last response is cached in `~/.cache/claude-usage/` for warm starts.
+2. **Local token totals**: tokens, burn rate and time left for the active 5-hour block, parsed from the account's `<config dir>/projects/*.jsonl` transcripts via [`ccusage`][ccusage]. Checked every **5 min** and on menu open; ccusage only runs when a transcript changed since its last run. "Refresh now" always runs it.
 
-The two paths are independent: if the OAuth endpoint is unreachable the
-indicator drops the percentage and switches to a yellow `🟡` icon, but
-ccusage tokens keep updating.
+The two paths are independent: if the OAuth endpoint is unreachable, that account's meter turns red and its column header says why, but ccusage tokens keep updating.
+
+### Accounts
+
+Each Claude Code config directory is one account. The `ACCOUNTS` constant at the top of `extension.js` lists them; by default `~/.claude` (Work) and `~/.claude-private` (Private, for a second login started with `CLAUDE_CONFIG_DIR="$HOME/.claude-private" claude`). An account whose directory does not exist is skipped, so a single-account setup shows one meter and one column.
+
+Every account has its own OAuth polling, backoff and cache file, and its own ccusage run with `CLAUDE_CONFIG_DIR` set, so each account only counts its own transcripts. Each account polls its own quota at the usual 5-9 min, so two accounts make twice as many requests from this machine. The column header shows the plan from the credentials file (`Team · Max 5x`, `Pro`).
 
 ### Per-model weekly limits
 
-Some models have their own weekly quota on top of the all-model one. The
-OAuth response reports these in its `limits` array as `weekly_scoped`
-entries, each tagged with a model name. The dropdown gets one extra row per
-entry, under the `Week (7d):` row, sorted worst first. Accounts with no such
-quota simply see no extra rows.
+Some models have their own weekly quota on top of the all-model one. The OAuth response reports these in its `limits` array as `weekly_scoped` entries, each tagged with a model name. The table gets one `<model> week` row per model that any account has a quota for, under the `Week` row. An account without that quota shows `—` in its column.
 
-These matter because a per-model quota can be exhausted while the headline
-numbers still look fine: `Session (5h)` at 12% and `Week (7d)` at 38% tells
-you nothing about Fable sitting at 99%.
+These matter because a per-model quota can be exhausted while the headline numbers still look fine: `Session` at 12% and `Week` at 38% tells you nothing about Fable sitting at 99%.
 
 ### Monthly spend
 
-Accounts with extra usage enabled can spend money past their plan limits, up to a monthly cap. The OAuth response reports this in its `spend` object, and the dropdown shows it as a `Spend (mo):` row under the weekly rows: percentage of the cap used, then the two amounts.
+Accounts with extra usage enabled can spend money past their plan limits, up to a monthly cap. The OAuth response reports this in its `spend` object, and the table shows it as a `Spend` row: a bar with the share of the cap used, and the two amounts on the line beneath.
 
 Amounts arrive as integer minor units plus an exponent, so `{"amount_minor": 2000, "exponent": 2}` renders as `20.00`. The currency comes from the same object; EUR, USD, GBP and JPY get a symbol, anything else gets the ISO code after the number (`8.00 SEK`).
 
-The row has no absolute-reset line, because a monthly cap is not a quota that resets on the clock the way the 5h and 7d buckets do. Accounts with no cap have no `spend` object, and then there is no row at all. When extra usage is switched off, the row reads `off` with the server's reason in parentheses instead of a bar.
+An account with no cap has no `spend` object and shows `—`; the row disappears when no account has one. When extra usage is switched off, the cell reads `off`, with the server's reason beneath when it gives one.
 
-### Top-bar emoji
+### Top-bar meters and colors
 
-Each entry in `limits` carries a `severity` the server assigns. The worst
-severity across all of them sets the icon, and it outranks the freshness of
-the two data paths, since running out of quota is more actionable than one
-source being down. When the worst entry is a per-model limit, the top bar
-names it, because that percentage is invisible in the session number.
+Each account's meter shows its all-model weekly limit, colored by the `severity` the server assigns to that limit. Session and per-model limits are in the table, where each bar uses its own limit's severity.
 
-| Top-bar emoji | Meaning |
+| What you see | Meaning |
 |---|---|
-| `🟢` | Both sources fresh, every limit normal. Top bar shows percentage. |
-| `🟢 12%*` | OAuth response is older than 20 min; ccusage still fresh. |
-| `🟡` | OAuth endpoint dead/unreachable; ccusage still working. |
-| `🟡 12% · Fable 80%` | A limit is at `warning` severity. |
-| `🔴 12% · Fable 99%` | A limit is at `critical` severity. |
-| `⚪` | No active block and 0% session usage. |
-| `⚠️` | Both sources broken. |
+| Green fill | The weekly limit is `normal`. |
+| Amber fill | The weekly limit is at `warning`. |
+| Red fill | The weekly limit is at `critical`. |
+| Faded fill | OAuth data is older than 20 min (stale). The column header says when it was updated. |
+| Red, empty track | The account's OAuth path is dead (2 h old or 6 failures in a row). The column header gives the reason. |
+| `⚠️ usage` | Every data path of every account is broken. |
 
-An unrecognized severity counts as `warning` rather than being ignored, so a
-new value the server starts sending still reaches the panel.
+The text after the meters is the active 5-hour block of the account used most recently (its last transcript entry is newest), led by the account letter. It disappears when no account has an active block.
+
+An unrecognized severity counts as `warning` rather than being ignored, so a new value the server starts sending still reaches the panel.
 
 [ccusage]: https://github.com/ryoppippi/ccusage
 
@@ -95,9 +87,7 @@ new value the server starts sending still reaches the panel.
   ```sh
   sudo npm install -g ccusage
   ```
-- **A Claude Pro / Max / Team subscription** signed in via `claude login`
-  for the OAuth percentages to work. Without it the OAuth path stays
-  `🟡` (unavailable) and you only get the ccusage-based view.
+- **A Claude Pro / Max / Team subscription** signed in via `claude login` for the OAuth percentages to work. Without it the account's OAuth path stays dead and you only get the ccusage-based numbers.
 - **`gnome-terminal`** (for the "Open ccusage in terminal" menu item).
   Replace the path in `extension.js` if you use a different terminal.
 
@@ -134,14 +124,15 @@ No GUI yet (see [ROADMAP.md](ROADMAP.md)). Tweak constants at the top of
 
 | Constant                  | Default                        | What it does                                           |
 |---------------------------|--------------------------------|--------------------------------------------------------|
+| `ACCOUNTS`                | `~/.claude` (W), `~/.claude-private` (P) | Config directories to show, with label, letter and cache file |
 | `CCUSAGE_INTERVAL_SEC`    | `300`                          | ccusage poll interval                                  |
 | `CCUSAGE`                 | `/usr/local/bin/ccusage`       | Path to the ccusage binary                             |
 | `CCUSAGE_ARGS`            | `blocks --active --json --offline` | ccusage invocation flags                          |
 | `OAUTH_BASE_SEC`          | `420` (7 min)                  | Base interval between OAuth fetches                    |
 | `OAUTH_JITTER_SEC`        | `120` (±2 min)                 | Random jitter added to each OAuth tick                 |
 | `OAUTH_BACKOFF_MAX_SEC`   | `1800` (30 min)                | Ceiling on exponential backoff after 429s              |
-| `OAUTH_STALE_AFTER_MS`    | 20 min                         | When the top-bar percentage gets the `*` stale marker |
-| `OAUTH_DEAD_AFTER_MS`     | 2 h                            | When OAuth is treated as dead and the % is dropped     |
+| `OAUTH_STALE_AFTER_MS`    | 20 min                         | When an account's bars fade as stale                  |
+| `OAUTH_DEAD_AFTER_MS`     | 2 h                            | When an account's OAuth path is treated as dead        |
 | `OAUTH_DEAD_MAX_FAILS`    | `6`                            | Consecutive non-2xx responses before marking dead      |
 
 ## Development
@@ -223,8 +214,7 @@ discouraged. This extension takes a conservative interpretation:
 - It polls at **5–9 min** intervals — substantially slower than `/usage`'s
   on-demand rate — to be a good citizen and stay under the endpoint's
   rate limit.
-- It degrades gracefully if the endpoint stops answering: ccusage data
-  continues to flow and the panel switches to `🟡`.
+- It degrades gracefully if the endpoint stops answering: ccusage data continues to flow and the account's meter turns red.
 
 If Anthropic ships an officially-supported way to query subscription
 quotas, the OAuth path will be replaced with that.
@@ -234,8 +224,7 @@ quotas, the OAuth path will be replaced with that.
 
 ## Roadmap
 
-Future work — settings UI, threshold notifications, multi-account, EGO
-submission — lives in [ROADMAP.md](ROADMAP.md).
+Future work (settings UI, threshold notifications, EGO submission) lives in [ROADMAP.md](ROADMAP.md).
 
 ## License
 

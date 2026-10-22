@@ -1,4 +1,3 @@
-import GObject from 'gi://GObject';
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -10,28 +9,48 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
+const HOME = GLib.get_home_dir();
+
+// ---- accounts ----
+// One entry per Claude Code config directory. An account whose directory does
+// not exist is skipped. `cacheFile` keeps the first account on the cache name
+// older versions wrote, so its warm start survives the upgrade.
+const ACCOUNTS = [
+    {label: 'Work',    letter: 'W', configDir: GLib.build_filenamev([HOME, '.claude']),
+     cacheFile: 'last-oauth.json'},
+    {label: 'Private', letter: 'P', configDir: GLib.build_filenamev([HOME, '.claude-private']),
+     cacheFile: 'last-oauth-private.json'},
+];
+
 // ---- ccusage path (5 min polling) ----
-// Each run rescans every transcript under ~/.claude/projects, which costs tens of
-// CPU-seconds on a large history, so keep this interval long.
+// Each run rescans every transcript of the account, which costs tens of
+// CPU-seconds on a large history, so keep this interval long. A tick only runs
+// ccusage when a transcript changed since the last run (TRANSCRIPT_CHECK_CMD).
 const CCUSAGE_INTERVAL_SEC = 300;
 const CCUSAGE = '/usr/local/bin/ccusage';
 const CCUSAGE_ARGS = ['blocks', '--active', '--json', '--offline'];
-const TERMINAL_CMD = ['/usr/bin/gnome-terminal', '--', 'bash', '-c',
-    `${CCUSAGE} blocks --recent --offline; echo; read -n1 -r -p 'Press any key to close…'`];
+// Prints the first transcript modified after the given unix time, or nothing.
+const TRANSCRIPT_CHECK_CMD = (projectsDir, sinceSec) => ['/usr/bin/find', projectsDir,
+    '-type', 'f', '-name', '*.jsonl', '-newermt', `@${sinceSec}`, '-print', '-quit'];
+const TERMINAL = '/usr/bin/gnome-terminal';
 
-// ---- OAuth path (5–9 min jittered polling) ----
-const CREDS_PATH       = GLib.build_filenamev([GLib.get_home_dir(), '.claude', '.credentials.json']);
+// ---- OAuth path (5-9 min jittered polling, per account) ----
 const CACHE_DIR        = GLib.build_filenamev([GLib.get_user_cache_dir(), 'claude-usage']);
-const CACHE_FILE       = GLib.build_filenamev([CACHE_DIR, 'last-oauth.json']);
 const OAUTH_URL        = 'https://api.anthropic.com/api/oauth/usage';
 const OAUTH_BETA       = 'oauth-2025-04-20';
 
 const OAUTH_BASE_SEC        = 420;        // 7 min base
-const OAUTH_JITTER_SEC      = 120;        // ±2 min, range 5–9 min
+const OAUTH_JITTER_SEC      = 120;        // +/-2 min, range 5-9 min
 const OAUTH_BACKOFF_MAX_SEC = 1800;       // 30 min ceiling on 429
 const OAUTH_STALE_AFTER_MS  = 20 * 60 * 1000;
 const OAUTH_DEAD_AFTER_MS   = 2 * 60 * 60 * 1000;
 const OAUTH_DEAD_MAX_FAILS  = 6;
+
+// ---- layout ----
+// Widths are in CSS pixels, matching the track widths in stylesheet.css, so a
+// fill's share of its track is exact.
+const METER_PX = 40;
+const BAR_PX   = 80;
 
 // ---- formatters ----
 function fmtTokens(n) {
@@ -47,11 +66,6 @@ function fmtMins(m) {
     const h = Math.floor(m / 60);
     const mm = Math.round(m % 60);
     return `${h}h${String(mm).padStart(2, '0')}m`;
-}
-
-function fmtUSD(n) {
-    if (n == null) return '—';
-    return '$' + n.toFixed(2);
 }
 
 function fmtPct(n) {
@@ -73,15 +87,15 @@ function fmtUntilIso(iso) {
     return `${d}d${h % 24}h`;
 }
 
-// Absolute local wall-clock for a reset timestamp, e.g. "Sat 27 Jun 16:59".
-// Locale-aware via GLib (honours LC_TIME); returns null when unparseable.
-function fmtAbsIso(iso) {
-    if (!iso) return null;
+// Local weekday and wall-clock for a reset timestamp, e.g. "Sat 16:59".
+// Locale-aware via GLib (honors LC_TIME); a weekly reset is never more than
+// seven days out, so the weekday is unambiguous.
+function fmtWeekdayIso(iso) {
+    if (!iso) return '—';
     const t = Date.parse(iso);
-    if (!Number.isFinite(t)) return null;
+    if (!Number.isFinite(t)) return '—';
     const dt = GLib.DateTime.new_from_unix_local(Math.floor(t / 1000));
-    if (!dt) return null;
-    return dt.format('%a %d %b %H:%M');
+    return dt ? dt.format('%a %H:%M') : '—';
 }
 
 function fmtAgo(ms) {
@@ -94,24 +108,13 @@ function fmtAgo(ms) {
     return `${Math.floor(h / 24)}d ago`;
 }
 
-const BAR_WIDTH = 10;
-const BAR_PARTIAL = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
-
-function fmtBar(pct) {
-    if (pct == null || !Number.isFinite(pct)) return '[' + '░'.repeat(BAR_WIDTH) + ']';
-    const clamped = Math.max(0, Math.min(100, pct));
-    const eighths = Math.round((clamped / 100) * BAR_WIDTH * 8);
-    const full = Math.floor(eighths / 8);
-    const partial = eighths % 8;
-    let bar = '█'.repeat(full);
-    if (partial > 0) bar += BAR_PARTIAL[partial];
-    bar += '░'.repeat(BAR_WIDTH - full - (partial > 0 ? 1 : 0));
-    return `[${bar}]`;
-}
-
-const LABEL_WIDTH = 14;
-function kv(label, value) {
-    return label.padEnd(LABEL_WIDTH) + value;
+// "team" + "default_claude_max_5x" -> "Team · Max 5x"; "pro" -> "Pro".
+function fmtPlan(subscriptionType, rateLimitTier) {
+    const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+    const tier = /max_(\d+x)/.exec(rateLimitTier ?? '')?.[1];
+    if (!subscriptionType) return tier ? `Max ${tier}` : '';
+    if (subscriptionType === 'max') return tier ? `Max ${tier}` : 'Max';
+    return tier ? `${cap(subscriptionType)} · Max ${tier}` : cap(subscriptionType);
 }
 
 // ---- limits[] : per-model quotas and server-side severity ----
@@ -125,6 +128,7 @@ const SEV_NORMAL   = 0;
 const SEV_WARNING  = 1;
 const SEV_CRITICAL = 2;
 const SEVERITY_RANK = {normal: SEV_NORMAL, warning: SEV_WARNING, critical: SEV_CRITICAL};
+const SEVERITY_CLASS = ['normal', 'warning', 'critical'];
 
 function severityRank(severity) {
     if (!severity || severity === 'normal') return SEV_NORMAL;
@@ -133,26 +137,16 @@ function severityRank(severity) {
     return SEVERITY_RANK[severity] ?? SEV_WARNING;
 }
 
-// Per-model weekly limits, worst first, so the row that needs attention is the
-// one nearest the all-model week row.
-function scopedWeeklyLimits(data) {
-    const limits = Array.isArray(data?.limits) ? data.limits : [];
-    return limits
-        .filter(l => l?.kind === 'weekly_scoped' && l?.scope?.model?.display_name)
-        .sort((a, b) => (b.percent ?? 0) - (a.percent ?? 0));
+function limitsOf(data) {
+    return Array.isArray(data?.limits) ? data.limits : [];
 }
 
-// Model names have to fit the same padded column as "Session (5h):", leaving
-// one space before the value. Longer names are truncated rather than allowed to
-// push the bars out of alignment.
-const SCOPED_SUFFIX = ' (7d):';
-const SCOPED_NAME_MAX = LABEL_WIDTH - 1 - SCOPED_SUFFIX.length;
+function limitOfKind(data, kind) {
+    return limitsOf(data).find(l => l?.kind === kind) ?? null;
+}
 
-function scopedLabel(name) {
-    const short = name.length > SCOPED_NAME_MAX
-        ? name.slice(0, SCOPED_NAME_MAX - 1) + '…'
-        : name;
-    return short + SCOPED_SUFFIX;
+function scopedWeeklyLimits(data) {
+    return limitsOf(data).filter(l => l?.kind === 'weekly_scoped' && l?.scope?.model?.display_name);
 }
 
 // ---- spend : the monthly extra-usage cap ----
@@ -173,131 +167,107 @@ function logTag(msg) {
     log(`[claude-usage] ${msg}`);
 }
 
-const ClaudeUsageIndicator = GObject.registerClass(
-class ClaudeUsageIndicator extends PanelMenu.Button {
-    _init() {
-        super._init(0.0, 'Claude Usage');
+// ---- one account: its OAuth path and its ccusage path ----
+// The two paths keep separate timers, cancellables and state. `onChange` is
+// called after either path updates; only the indicator's _render() combines
+// them.
+class Account {
+    constructor(def, soup, onChange) {
+        this.label = def.label;
+        this.letter = def.letter;
+        this._configDir = def.configDir;
+        this._credsPath = GLib.build_filenamev([def.configDir, '.credentials.json']);
+        this._projectsDir = GLib.build_filenamev([def.configDir, 'projects']);
+        this._cacheFile = GLib.build_filenamev([CACHE_DIR, def.cacheFile]);
+        this._soup = soup;
+        this._onChange = onChange;
 
-        this._label = new St.Label({
-            text: '… loading',
-            y_align: Clutter.ActorAlign.CENTER,
-            style_class: 'claude-usage-label',
-        });
-        this.add_child(this._label);
-
-        // OAuth percentages on top — they're the more important number.
-        // Each pct row gets a dedicated sub-row beneath it for the absolute
-        // reset wall-clock (a single St.Label won't render a second line here).
-        this._sessionItem      = new PopupMenu.PopupMenuItem('Session (5h):', {reactive: false});
-        this._sessionResetItem = new PopupMenu.PopupMenuItem('', {reactive: false});
-        this._weekItem         = new PopupMenu.PopupMenuItem('Week (7d):',    {reactive: false});
-        this._weekResetItem    = new PopupMenu.PopupMenuItem('', {reactive: false});
-        this.menu.addMenuItem(this._sessionItem);
-        this.menu.addMenuItem(this._sessionResetItem);
-        this.menu.addMenuItem(this._weekItem);
-        this.menu.addMenuItem(this._weekResetItem);
-
-        // Per-model weekly rows sit under the all-model week row. How many
-        // there are depends on the account, so they live in a section with a
-        // pool of rows that grows on demand and hides what it doesn't need.
-        this._scopedSection = new PopupMenu.PopupMenuSection();
-        this._scopedRows = [];
-        this.menu.addMenuItem(this._scopedSection);
-
-        // A monthly money cap, not a quota that resets on a clock, so this row
-        // gets no absolute-reset sub-row.
-        this._spendItem = new PopupMenu.PopupMenuItem('Spend (mo):', {reactive: false});
-        this.menu.addMenuItem(this._spendItem);
-
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-        // ccusage rows
-        this._tokensItem = new PopupMenu.PopupMenuItem('Tokens:',  {reactive: false});
-        this._burnItem   = new PopupMenu.PopupMenuItem('Burn:',    {reactive: false});
-        this._costItem   = new PopupMenu.PopupMenuItem('Cost:',    {reactive: false});
-        this._endsItem   = new PopupMenu.PopupMenuItem('Ends in:', {reactive: false});
-        this.menu.addMenuItem(this._tokensItem);
-        this.menu.addMenuItem(this._burnItem);
-        this.menu.addMenuItem(this._costItem);
-        this.menu.addMenuItem(this._endsItem);
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-        // Monospace the inner labels so the progress bar and column labels line up.
-        for (const item of [this._sessionItem, this._sessionResetItem,
-                            this._weekItem, this._weekResetItem,
-                            this._spendItem,
-                            this._tokensItem, this._burnItem,
-                            this._costItem, this._endsItem]) {
-            item.label.add_style_class_name('claude-usage-mono');
-        }
-
-        const openTermItem = new PopupMenu.PopupMenuItem('Open ccusage in terminal');
-        openTermItem.connect('activate', () => this._openInTerminal());
-        this.menu.addMenuItem(openTermItem);
-
-        const refreshItem = new PopupMenu.PopupMenuItem('Refresh now');
-        refreshItem.connect('activate', () => this._refresh());
-        this.menu.addMenuItem(refreshItem);
-
-        // Refresh ccusage on menu open — but NOT OAuth (don't burn quota on click).
-        this.menu.connect('open-state-changed', (_menu, isOpen) => {
-            if (isOpen) this._refreshCcusage();
-        });
-
-        // state
-        this._ccusageData = null;
-        this._ccusageError = null;
-        this._lastOauth = null;
-        this._lastOauthError = null;
+        this.plan = '';
+        this.oauth = null;
+        this.oauthError = null;
         this._oauthFailStreak = 0;
         this._oauthInterval = OAUTH_BASE_SEC;
         this._lastTokenSeen = null;
-
-        this._ccusageTimerId = 0;
         this._oauthTimerId = 0;
-        this._ccusageCancellable = null;
-        this._ccusageProc = null;
         this._oauthCancellable = null;
 
-        this._soup = new Soup.Session({user_agent: 'claude-usage-gnome/0.2'});
+        this.ccusage = null;
+        this.ccusageError = null;
+        this._ccusageTimerId = 0;
+        this._ccusageCancellable = null;
+        this._ccusageProc = null;
+        this._ccusageRunStartSec = null;
+    }
 
+    start() {
+        this._readCredentials();
         this._loadOauthCacheSync();
-        this._render();
-        this._refreshCcusage();
-        this._startCcusageTimer();
+        this.refreshCcusage();
+        this._ccusageTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, CCUSAGE_INTERVAL_SEC, () => {
+            this.refreshCcusage();
+            return GLib.SOURCE_CONTINUE;
+        });
         this._scheduleOauthTick(0);
+    }
+
+    _log(msg) {
+        logTag(`${this.label}: ${msg}`);
     }
 
     // ---------- ccusage ----------
 
-    _startCcusageTimer() {
-        this._ccusageTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, CCUSAGE_INTERVAL_SEC, () => {
-            this._refreshCcusage();
-            return GLib.SOURCE_CONTINUE;
-        });
-    }
-
-    _refresh() {
-        // User-triggered "Refresh now" — only the cheap path.
-        this._refreshCcusage();
-    }
-
-    _refreshCcusage() {
+    refreshCcusage(force = false) {
         // A run already in flight returns fresh data soon; starting another
         // would scan the whole transcript history twice in parallel.
         if (this._ccusageProc) return;
+
+        const block = this.activeBlock();
+        const blockEnded = block && Date.parse(block.endTime) <= Date.now();
+        if (force || this.ccusageError || !this.ccusage || blockEnded ||
+            this._ccusageRunStartSec == null) {
+            this._runCcusage();
+            return;
+        }
+
+        // One second of slack covers transcript writes in the same second the
+        // last run started.
+        const argv = TRANSCRIPT_CHECK_CMD(this._projectsDir, this._ccusageRunStartSec - 1);
+        this._spawnCcusageStep(argv, (p, stdout) => {
+            // A failed check (e.g. no projects directory yet) falls back to a real run.
+            if (!p.get_successful() || stdout.trim() !== '') this._runCcusage();
+        });
+    }
+
+    _runCcusage() {
+        this._ccusageRunStartSec = Math.floor(Date.now() / 1000);
+        this._spawnCcusageStep([CCUSAGE, ...CCUSAGE_ARGS], (p, stdout) => {
+            if (!p.get_successful()) {
+                this.ccusageError = 'ccusage exited non-zero';
+                this.ccusage = null;
+            } else {
+                this.ccusage = JSON.parse(stdout);
+                this.ccusageError = null;
+            }
+        });
+    }
+
+    // Runs one subprocess of the ccusage path through _ccusageProc and
+    // _ccusageCancellable, so destroy() releases it like any other run.
+    // CLAUDE_CONFIG_DIR points ccusage at this account's transcripts only.
+    _spawnCcusageStep(argv, onDone) {
         this._ccusageCancellable = new Gio.Cancellable();
 
         let proc;
         try {
-            proc = Gio.Subprocess.new(
-                [CCUSAGE, ...CCUSAGE_ARGS],
-                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE
-            );
+            const launcher = new Gio.SubprocessLauncher({
+                flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE,
+            });
+            launcher.setenv('CLAUDE_CONFIG_DIR', this._configDir, true);
+            proc = launcher.spawnv(argv);
         } catch (e) {
-            this._ccusageError = `spawn: ${e.message}`;
-            this._ccusageData = null;
-            this._render();
+            this.ccusageError = `spawn: ${e.message}`;
+            this.ccusage = null;
+            this._onChange();
             return;
         }
         this._ccusageProc = proc;
@@ -306,20 +276,24 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             if (this._ccusageProc === p) this._ccusageProc = null;
             try {
                 const [, stdout] = p.communicate_utf8_finish(res);
-                if (!p.get_successful()) {
-                    this._ccusageError = 'ccusage exited non-zero';
-                    this._ccusageData = null;
-                } else {
-                    this._ccusageData = JSON.parse(stdout);
-                    this._ccusageError = null;
-                }
+                onDone(p, stdout ?? '');
             } catch (e) {
                 if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
-                this._ccusageError = `parse: ${e.message}`;
-                this._ccusageData = null;
+                this.ccusageError = `parse: ${e.message}`;
+                this.ccusage = null;
             }
-            this._render();
+            this._onChange();
         });
+    }
+
+    activeBlock() {
+        const blocks = this.ccusage?.blocks || [];
+        return blocks.find(b => b.isActive) || null;
+    }
+
+    classifyCcusage() {
+        if (this.ccusageError || !this.ccusage) return 'dead';
+        return this.activeBlock() ? 'fresh' : 'idle';
     }
 
     // ---------- OAuth ----------
@@ -337,7 +311,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             const jitter = (Math.random() * 2 - 1) * OAUTH_JITTER_SEC;
             delay = Math.max(60, Math.min(OAUTH_BACKOFF_MAX_SEC, Math.round(base + jitter)));
         }
-        logTag(`next OAuth tick in ${delay}s`);
+        this._log(`next OAuth tick in ${delay}s`);
         this._oauthTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, delay, () => {
             this._oauthTimerId = 0;
             this._refreshOauth();
@@ -345,26 +319,27 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         });
     }
 
-    _readToken() {
+    // Returns the access token and refreshes `plan` from the same file.
+    _readCredentials() {
         try {
-            const file = Gio.File.new_for_path(CREDS_PATH);
+            const file = Gio.File.new_for_path(this._credsPath);
             const [ok, contents] = file.load_contents(null);
             if (!ok) return null;
-            const text = new TextDecoder().decode(contents);
-            const json = JSON.parse(text);
-            return json?.claudeAiOauth?.accessToken ?? null;
+            const oauth = JSON.parse(new TextDecoder().decode(contents))?.claudeAiOauth;
+            this.plan = fmtPlan(oauth?.subscriptionType, oauth?.rateLimitTier);
+            return oauth?.accessToken ?? null;
         } catch (e) {
-            logTag(`token read failed: ${e.message}`);
+            this._log(`token read failed: ${e.message}`);
             return null;
         }
     }
 
     _refreshOauth() {
-        const token = this._readToken();
+        const token = this._readCredentials();
         if (!token) {
             this._oauthFailStreak++;
-            this._lastOauthError = {code: 0, message: 'no token in credentials file', at: Date.now()};
-            this._render();
+            this.oauthError = {code: 0, message: 'no token in credentials file', at: Date.now()};
+            this._onChange();
             this._scheduleOauthTick();
             return;
         }
@@ -387,9 +362,9 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             } catch (e) {
                 if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
                 this._oauthFailStreak++;
-                this._lastOauthError = {code: 0, message: e.message, at: Date.now()};
-                logTag(`OAuth network error: ${e.message}`);
-                this._render();
+                this.oauthError = {code: 0, message: e.message, at: Date.now()};
+                this._log(`OAuth network error: ${e.message}`);
+                this._onChange();
                 this._scheduleOauthTick();
                 return;
             }
@@ -400,65 +375,64 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             if (status === 200) {
                 try {
                     const data = JSON.parse(body);
-                    this._lastOauth = {...data, fetchedAt: Date.now()};
-                    this._lastOauthError = null;
+                    this.oauth = {...data, fetchedAt: Date.now()};
+                    this.oauthError = null;
                     this._oauthFailStreak = 0;
                     this._oauthInterval = OAUTH_BASE_SEC;
-                    this._writeOauthCache(this._lastOauth);
+                    this._writeOauthCache(this.oauth);
                     const scoped = scopedWeeklyLimits(data)
                         .map(l => ` ${l.scope.model.display_name}=${l.percent}`).join('');
-                    logTag(`OAuth ok: 5h=${data?.five_hour?.utilization} 7d=${data?.seven_day?.utilization}${scoped}`);
+                    this._log(`OAuth ok: 5h=${data?.five_hour?.utilization} 7d=${data?.seven_day?.utilization}${scoped}`);
                 } catch (e) {
                     this._oauthFailStreak++;
-                    this._lastOauthError = {code: 200, message: `parse: ${e.message}`, at: Date.now()};
-                    logTag(`OAuth parse error: ${e.message}`);
+                    this.oauthError = {code: 200, message: `parse: ${e.message}`, at: Date.now()};
+                    this._log(`OAuth parse error: ${e.message}`);
                 }
             } else if (status === 429) {
                 this._oauthFailStreak++;
-                this._lastOauthError = {code: 429, message: 'rate limited (429)', at: Date.now()};
+                this.oauthError = {code: 429, message: 'rate limited (429)', at: Date.now()};
                 this._oauthInterval = Math.min(OAUTH_BACKOFF_MAX_SEC, this._oauthInterval * 2);
-                logTag(`OAuth 429; backoff -> ${this._oauthInterval}s`);
+                this._log(`OAuth 429; backoff -> ${this._oauthInterval}s`);
             } else if (status === 401) {
-                logTag(`OAuth 401${sameToken ? ' (same token)' : ' (new token)'}`);
+                this._log(`OAuth 401${sameToken ? ' (same token)' : ' (new token)'}`);
                 if (!sameToken) {
-                    this._render();
+                    this._onChange();
                     this._scheduleOauthTick(0);
                     return;
                 }
                 this._oauthFailStreak++;
-                this._lastOauthError = {code: 401, message: 'unauthorized (401)', at: Date.now()};
+                this.oauthError = {code: 401, message: 'unauthorized (401)', at: Date.now()};
                 this._oauthInterval = Math.min(OAUTH_BACKOFF_MAX_SEC, this._oauthInterval * 2);
             } else {
                 this._oauthFailStreak++;
-                this._lastOauthError = {code: status, message: `HTTP ${status}`, at: Date.now()};
-                logTag(`OAuth HTTP ${status}: ${body.slice(0, 200)}`);
+                this.oauthError = {code: status, message: `HTTP ${status}`, at: Date.now()};
+                this._log(`OAuth HTTP ${status}: ${body.slice(0, 200)}`);
             }
-            this._render();
+            this._onChange();
             this._scheduleOauthTick();
         });
     }
 
     _loadOauthCacheSync() {
         try {
-            const file = Gio.File.new_for_path(CACHE_FILE);
+            const file = Gio.File.new_for_path(this._cacheFile);
             if (!file.query_exists(null)) return;
             const [ok, contents] = file.load_contents(null);
             if (!ok) return;
-            const text = new TextDecoder().decode(contents);
-            const data = JSON.parse(text);
+            const data = JSON.parse(new TextDecoder().decode(contents));
             if (data && typeof data.fetchedAt === 'number') {
-                this._lastOauth = data;
-                logTag(`warm-start cache age=${Math.round((Date.now() - data.fetchedAt) / 1000)}s`);
+                this.oauth = data;
+                this._log(`warm-start cache age=${Math.round((Date.now() - data.fetchedAt) / 1000)}s`);
             }
         } catch (e) {
-            logTag(`cache load failed: ${e.message}`);
+            this._log(`cache load failed: ${e.message}`);
         }
     }
 
     _writeOauthCache(data) {
         try {
             GLib.mkdir_with_parents(CACHE_DIR, 0o700);
-            const file = Gio.File.new_for_path(CACHE_FILE);
+            const file = Gio.File.new_for_path(this._cacheFile);
             const bytes = new TextEncoder().encode(JSON.stringify(data));
             file.replace_contents(
                 bytes, null, false,
@@ -466,226 +440,30 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 null
             );
         } catch (e) {
-            logTag(`cache write failed: ${e.message}`);
+            this._log(`cache write failed: ${e.message}`);
         }
     }
 
-    // ---------- render ----------
-
-    _classifyOauth() {
-        if (!this._lastOauth) return 'dead';
+    classifyOauth() {
+        if (!this.oauth) return 'dead';
         if (this._oauthFailStreak >= OAUTH_DEAD_MAX_FAILS) return 'dead';
-        const age = Date.now() - this._lastOauth.fetchedAt;
+        const age = Date.now() - this.oauth.fetchedAt;
         if (age >= OAUTH_DEAD_AFTER_MS) return 'dead';
         if (age >= OAUTH_STALE_AFTER_MS) return 'stale';
         return 'fresh';
     }
 
-    _activeBlock() {
-        const blocks = this._ccusageData?.blocks || [];
-        return blocks.find(b => b.isActive) || null;
-    }
-
-    _classifyCcusage() {
-        if (this._ccusageError || !this._ccusageData) return 'dead';
-        return this._activeBlock() ? 'fresh' : 'idle';
-    }
-
-    // The limits[] entry the server rates worst, or null when everything is
-    // normal. Drives the top-bar emoji and the extra top-bar percentage.
-    _worstLimit() {
-        const limits = Array.isArray(this._lastOauth?.limits) ? this._lastOauth.limits : [];
-        let worst = null;
-        let worstRank = SEV_NORMAL;
-        for (const limit of limits) {
-            const rank = severityRank(limit?.severity);
-            if (rank > worstRank) {
-                worstRank = rank;
-                worst = limit;
-            }
-        }
-        return worst;
-    }
-
-    // Row `i` of the scoped pool, creating it (and everything before it) if the
-    // pool hasn't grown that far yet.
-    _scopedRow(i) {
-        while (this._scopedRows.length <= i) {
-            const main  = new PopupMenu.PopupMenuItem('', {reactive: false});
-            const reset = new PopupMenu.PopupMenuItem('', {reactive: false});
-            main.label.add_style_class_name('claude-usage-mono');
-            reset.label.add_style_class_name('claude-usage-mono');
-            this._scopedSection.addMenuItem(main);
-            this._scopedSection.addMenuItem(reset);
-            this._scopedRows.push({main, reset});
-        }
-        return this._scopedRows[i];
-    }
-
-    _render() {
-        const oauthState = this._classifyOauth();
-        const ccState    = this._classifyCcusage();
-
-        // ---- OAuth menu rows ----
-        // Each pct row writes its main line, plus an indented sub-row with the
-        // absolute reset wall-clock (its own menu item, so it always renders).
-        const setPctRow = (mainItem, resetItem, label, bucket, ageNote) => {
-            if (!bucket) {
-                mainItem.label.set_text(kv(label, 'unavailable — field missing in response'));
-                resetItem.visible = false;
-                return;
-            }
-            const bar = fmtBar(bucket.utilization);
-            const pct = fmtPct(bucket.utilization).padStart(4);
-            const reset = fmtUntilIso(bucket.resets_at);
-            const valuePrefix = `${bar} ${pct}  `;   // everything left of "resets in"
-            mainItem.label.set_text(kv(label, `${valuePrefix}resets in ${reset}${ageNote}`));
-            const abs = fmtAbsIso(bucket.resets_at);
-            if (abs) {
-                // Align the absolute line under "resets in …", not under the bar.
-                resetItem.label.set_text(' '.repeat(LABEL_WIDTH + valuePrefix.length) + `↳ ${abs}`);
-                resetItem.visible = true;
-            } else {
-                resetItem.visible = false;
-            }
+    // The all-model weekly limit, which the top-bar meter shows.
+    weekly() {
+        return {
+            pct: this.oauth?.seven_day?.utilization ?? 0,
+            rank: severityRank(limitOfKind(this.oauth, 'weekly_all')?.severity),
         };
-
-        const oauthReason = this._lastOauthError?.message || 'no data';
-        const oauthAge = this._lastOauth ? fmtAgo(Date.now() - this._lastOauth.fetchedAt) : null;
-        const ageNote = oauthState === 'stale' ? `  (${oauthAge})` : '';
-
-        if (oauthState === 'dead') {
-            if (this._lastOauth) {
-                const five = this._lastOauth.five_hour;
-                const seven = this._lastOauth.seven_day;
-                this._sessionItem.label.set_text(
-                    kv('Session (5h):', `unavailable — ${oauthReason} (last ${five ? fmtPct(five.utilization) : '—'}, ${oauthAge})`)
-                );
-                this._weekItem.label.set_text(
-                    kv('Week (7d):', `unavailable — ${oauthReason} (last ${seven ? fmtPct(seven.utilization) : '—'}, ${oauthAge})`)
-                );
-            } else {
-                this._sessionItem.label.set_text(kv('Session (5h):', `unavailable — ${oauthReason}`));
-                this._weekItem.label.set_text(kv('Week (7d):', `unavailable — ${oauthReason}`));
-            }
-            this._sessionResetItem.visible = false;
-            this._weekResetItem.visible = false;
-        } else {
-            setPctRow(this._sessionItem, this._sessionResetItem, 'Session (5h):', this._lastOauth.five_hour, ageNote);
-            setPctRow(this._weekItem, this._weekResetItem, 'Week (7d):', this._lastOauth.seven_day, ageNote);
-        }
-
-        // ---- per-model weekly rows ----
-        // Fed by the same payload as the two rows above, so a dead OAuth path
-        // degrades these the same way rather than making them disappear.
-        const scoped = scopedWeeklyLimits(this._lastOauth);
-        scoped.forEach((limit, i) => {
-            const row = this._scopedRow(i);
-            const label = scopedLabel(limit.scope.model.display_name);
-            row.main.visible = true;
-            if (oauthState === 'dead') {
-                row.main.label.set_text(
-                    kv(label, `unavailable — ${oauthReason} (last ${fmtPct(limit.percent)}, ${oauthAge})`)
-                );
-                row.reset.visible = false;
-            } else {
-                setPctRow(row.main, row.reset, label,
-                          {utilization: limit.percent, resets_at: limit.resets_at}, ageNote);
-            }
-        });
-        for (let i = scoped.length; i < this._scopedRows.length; i++) {
-            this._scopedRows[i].main.visible = false;
-            this._scopedRows[i].reset.visible = false;
-        }
-
-        // ---- monthly spend row ----
-        const spend = this._lastOauth?.spend;
-        this._spendItem.visible = !!spend;
-        if (spend) {
-            const used = fmtMoney(spend.used);
-            const limit = fmtMoney(spend.limit ?? spend.cap?.money);
-            if (oauthState === 'dead') {
-                this._spendItem.label.set_text(
-                    kv('Spend (mo):', `unavailable — ${oauthReason} (last ${used} of ${limit}, ${oauthAge})`)
-                );
-            } else if (spend.enabled === false) {
-                const why = spend.disabled_reason ? ` (${spend.disabled_reason})` : '';
-                this._spendItem.label.set_text(kv('Spend (mo):', `off${why}`));
-            } else {
-                const bar = fmtBar(spend.percent);
-                const pct = fmtPct(spend.percent).padStart(4);
-                this._spendItem.label.set_text(
-                    kv('Spend (mo):', `${bar} ${pct}  ${used} of ${limit}${ageNote}`)
-                );
-            }
-        }
-
-        // ---- ccusage menu rows ----
-        if (ccState === 'fresh') {
-            const a = this._activeBlock();
-            this._tokensItem.label.set_text(kv('Tokens:',  fmtTokens(a.totalTokens ?? 0)));
-            this._burnItem.label.set_text(kv('Burn:',     `${fmtTokens(a.burnRate?.tokensPerMinute)} tok/min`));
-            this._costItem.label.set_text(kv('Cost:',      fmtUSD(a.costUSD)));
-            this._endsItem.label.set_text(kv('Ends in:',   fmtMins(a.projection?.remainingMinutes)));
-        } else if (ccState === 'idle') {
-            this._tokensItem.label.set_text(kv('Tokens:',  '— (no active block)'));
-            this._burnItem.label.set_text(kv('Burn:',      '—'));
-            this._costItem.label.set_text(kv('Cost:',      '—'));
-            this._endsItem.label.set_text(kv('Ends in:',   '—'));
-        } else {
-            this._tokensItem.label.set_text(kv('Tokens:',  `error — ${this._ccusageError ?? 'unknown'}`));
-            this._burnItem.label.set_text(kv('Burn:',      '—'));
-            this._costItem.label.set_text(kv('Cost:',      '—'));
-            this._endsItem.label.set_text(kv('Ends in:',   '—'));
-        }
-
-        // ---- top bar ----
-        this._label.set_text(this._buildTopBarText(oauthState, ccState));
     }
 
-    _buildTopBarText(oauthState, ccState) {
-        if (oauthState === 'dead' && ccState === 'dead') return '⚠️ usage';
-
-        // A dead OAuth path has no trustworthy severity to report, so severity
-        // only speaks while the path is fresh or stale.
-        const worst = oauthState === 'dead' ? null : this._worstLimit();
-        const worstRank = severityRank(worst?.severity);
-
-        // Severity outranks path health: running out of quota is the more
-        // actionable fact than one of the two data sources being down.
-        let emoji;
-        if (worstRank >= SEV_CRITICAL) emoji = '🔴';
-        else if (worstRank >= SEV_WARNING) emoji = '🟡';
-        else if (oauthState === 'dead' && ccState !== 'dead') emoji = '🟡';
-        else if (ccState === 'idle' && (!this._lastOauth || (this._lastOauth.five_hour?.utilization ?? 0) === 0)) emoji = '⚪';
-        else emoji = '🟢';
-
-        const parts = [];
-        if (oauthState !== 'dead' && this._lastOauth?.five_hour) {
-            const star = oauthState === 'stale' ? '*' : '';
-            parts.push(`${fmtPct(this._lastOauth.five_hour.utilization)}${star}`);
-        }
-        // A per-model limit in trouble is invisible in the 5h number, so name
-        // it rather than leaving an unexplained red dot in the panel.
-        const worstModel = worst?.scope?.model?.display_name;
-        if (worstModel && worstRank >= SEV_WARNING) parts.push(`${worstModel} ${fmtPct(worst.percent)}`);
-        if (ccState === 'fresh') {
-            const a = this._activeBlock();
-            parts.push(fmtTokens(a.totalTokens ?? 0));
-            parts.push(fmtMins(a.projection?.remainingMinutes));
-        } else if (ccState === 'idle') {
-            parts.push('idle');
-        }
-        if (parts.length === 0) return `${emoji} usage`;
-        return `${emoji} ${parts.join(' · ')}`;
-    }
-
-    _openInTerminal() {
-        try {
-            Gio.Subprocess.new(TERMINAL_CMD, Gio.SubprocessFlags.NONE);
-        } catch (e) {
-            Main.notify('Claude Usage', `Could not open terminal: ${e.message}`);
-        }
+    terminalScript() {
+        const header = `echo; echo '== ${this.label} =='`;
+        return `${header}; CLAUDE_CONFIG_DIR=${GLib.shell_quote(this._configDir)} ${CCUSAGE} blocks --recent --offline`;
     }
 
     destroy() {
@@ -709,22 +487,267 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             this._oauthCancellable.cancel();
             this._oauthCancellable = null;
         }
+    }
+}
+
+// ---- widgets ----
+
+// A track with a fill whose width is the given share of `trackPx`. Non-zero
+// values get at least 2px so a 1% limit is still visible.
+function bar(pct, rank, trackClass, fillClass, trackPx) {
+    const track = new St.Widget({
+        style_class: trackClass,
+        y_align: Clutter.ActorAlign.CENTER,
+        layout_manager: new Clutter.BinLayout(),
+    });
+    const clamped = Math.max(0, Math.min(100, pct ?? 0));
+    const px = clamped > 0 ? Math.max(2, Math.round(clamped / 100 * trackPx)) : 0;
+    const fill = new St.Widget({
+        style_class: `${fillClass} claude-usage-sev-${SEVERITY_CLASS[rank]}`,
+        style: `width: ${px}px;`,
+        x_align: Clutter.ActorAlign.START,
+        x_expand: true,
+    });
+    track.add_child(fill);
+    return {track, fill};
+}
+
+function label(text, styleClass) {
+    return new St.Label({text, style_class: styleClass, y_align: Clutter.ActorAlign.CENTER});
+}
+
+// A plain class around a PanelMenu.Button rather than a GObject subclass, so
+// loading the module again in the same Shell registers no second GType.
+class ClaudeUsageIndicator {
+    constructor() {
+        this.button = new PanelMenu.Button(0.0, 'Claude Usage');
+        this.menu = this.button.menu;
+
+        this._soup = new Soup.Session({user_agent: 'claude-usage-gnome/0.2'});
+        this._accounts = ACCOUNTS
+            .filter(def => GLib.file_test(def.configDir, GLib.FileTest.IS_DIR))
+            .map(def => new Account(def, this._soup, () => this._render()));
+
+        // Top bar: one meter per account, then the active block.
+        this._pill = new St.BoxLayout({style_class: 'claude-usage-pill', y_align: Clutter.ActorAlign.CENTER});
+        this._meters = new St.BoxLayout({
+            style_class: 'claude-usage-meters', vertical: true, y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._blockLetter = label('', 'claude-usage-block-letter');
+        this._blockLabel = label('… loading', 'claude-usage-label');
+        this._pill.add_child(this._meters);
+        this._pill.add_child(this._blockLetter);
+        this._pill.add_child(this._blockLabel);
+        this.button.add_child(this._pill);
+
+        // Dropdown: one column per account, rebuilt on every render.
+        this._table = new St.BoxLayout({style_class: 'claude-usage-table', vertical: true});
+        const tableSection = new PopupMenu.PopupMenuSection();
+        tableSection.actor.add_child(this._table);
+        this.menu.addMenuItem(tableSection);
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const openTermItem = new PopupMenu.PopupMenuItem('Open ccusage in terminal');
+        openTermItem.connect('activate', () => this._openInTerminal());
+        this.menu.addMenuItem(openTermItem);
+
+        const refreshItem = new PopupMenu.PopupMenuItem('Refresh now');
+        refreshItem.connect('activate', () => this._refresh());
+        this.menu.addMenuItem(refreshItem);
+
+        // Refresh ccusage on menu open, but NOT OAuth (don't burn quota on click).
+        this.menu.connect('open-state-changed', (_menu, isOpen) => {
+            if (isOpen) this._accounts.forEach(a => a.refreshCcusage());
+        });
+
+        this._render();
+        this._accounts.forEach(a => a.start());
+    }
+
+    _refresh() {
+        // User-triggered "Refresh now": only the cheap path.
+        this._accounts.forEach(a => a.refreshCcusage(true));
+    }
+
+    // ---------- render ----------
+
+    _render() {
+        this._renderTopBar();
+        this._renderTable();
+    }
+
+    _renderTopBar() {
+        this._meters.destroy_all_children();
+        const states = this._accounts.map(a => ({oauth: a.classifyOauth(), cc: a.classifyCcusage()}));
+        const allDead = states.every(s => s.oauth === 'dead' && s.cc === 'dead');
+
+        this._meters.visible = !allDead && this._accounts.length > 0;
+        this._accounts.forEach((account, i) => {
+            const row = new St.BoxLayout({style_class: 'claude-usage-meter-row'});
+            row.add_child(label(account.letter, 'claude-usage-meter-letter'));
+            const oauthState = states[i].oauth;
+            const {pct, rank} = account.weekly();
+            const shown = oauthState === 'dead' ? 0 : pct;
+            const {track, fill} = bar(shown, rank, 'claude-usage-meter', 'claude-usage-meter-fill', METER_PX);
+            if (oauthState === 'dead') track.add_style_class_name('claude-usage-meter-dead');
+            // Stale data still shows, faded, so the bar never claims to be current.
+            if (oauthState === 'stale') fill.opacity = 110;
+            row.add_child(track);
+            this._meters.add_child(row);
+        });
+
+        if (allDead) {
+            this._blockLetter.visible = false;
+            this._blockLabel.visible = true;
+            this._blockLabel.set_text('⚠️ usage');
+            return;
+        }
+
+        // The active block whose last activity is most recent: the account in use.
+        let current = null;
+        for (const account of this._accounts) {
+            const block = account.activeBlock();
+            if (!block) continue;
+            const last = Date.parse(block.actualEndTime ?? block.startTime);
+            if (!current || last > current.last) current = {account, block, last};
+        }
+        this._blockLetter.visible = !!current && this._accounts.length > 1;
+        this._blockLabel.visible = !!current;
+        if (current) {
+            const {account, block} = current;
+            this._blockLetter.set_text(account.letter);
+            const ends = block.endTime ? fmtUntilIso(block.endTime) : fmtMins(block.projection?.remainingMinutes);
+            this._blockLabel.set_text(`${fmtTokens(block.totalTokens ?? 0)} · ${ends}`);
+        }
+    }
+
+    _renderTable() {
+        this._table.destroy_all_children();
+        const accounts = this._accounts;
+        const oauthStates = accounts.map(a => a.classifyOauth());
+        const ccStates = accounts.map(a => a.classifyCcusage());
+
+        const addRow = (labelText, cells, extraClass = '') => {
+            const row = new St.BoxLayout({style_class: `claude-usage-row ${extraClass}`});
+            row.add_child(label(labelText, 'claude-usage-row-label'));
+            cells.forEach(cell => row.add_child(cell));
+            this._table.add_child(row);
+        };
+        const textCell = (text, styleClass = 'claude-usage-value') => {
+            const cell = new St.BoxLayout({style_class: 'claude-usage-cell'});
+            cell.add_child(label(text, styleClass));
+            return cell;
+        };
+        const dimCell = text => textCell(text, 'claude-usage-dim');
+        const barCell = (i, pct, rank) => {
+            if (pct == null) return dimCell('—');
+            const cell = new St.BoxLayout({style_class: 'claude-usage-cell'});
+            const {track, fill} = bar(pct, rank, 'claude-usage-bar', 'claude-usage-bar-fill', BAR_PX);
+            if (oauthStates[i] !== 'fresh') fill.opacity = 110;
+            cell.add_child(track);
+            cell.add_child(label(fmtPct(pct), 'claude-usage-pct'));
+            return cell;
+        };
+        // OAuth values of account i, or null when there is nothing to show.
+        const oauthOf = i => accounts[i].oauth;
+
+        // ---- column headers ----
+        const headCells = accounts.map((account, i) => {
+            const col = new St.BoxLayout({style_class: 'claude-usage-cell', vertical: true});
+            col.add_child(label(account.label, 'claude-usage-col-name'));
+            let sub = account.plan;
+            if (oauthStates[i] === 'dead') {
+                sub = account.oauthError?.message ?? 'no data';
+                if (account.oauth) sub += `, ${fmtAgo(Date.now() - account.oauth.fetchedAt)}`;
+            } else if (oauthStates[i] === 'stale') {
+                sub = `updated ${fmtAgo(Date.now() - account.oauth.fetchedAt)}`;
+            }
+            col.add_child(label(sub || ' ', 'claude-usage-col-sub'));
+            return col;
+        });
+        addRow('', headCells, 'claude-usage-head');
+
+        // ---- limits ----
+        addRow('Session', accounts.map((_, i) => barCell(i,
+            oauthOf(i)?.five_hour?.utilization,
+            severityRank(limitOfKind(oauthOf(i), 'session')?.severity))));
+        addRow('Week', accounts.map((_, i) => barCell(i,
+            oauthOf(i)?.seven_day?.utilization,
+            severityRank(limitOfKind(oauthOf(i), 'weekly_all')?.severity))));
+
+        // One row per model that has its own weekly quota on any account.
+        const models = [...new Set(accounts.flatMap(a =>
+            scopedWeeklyLimits(a.oauth).map(l => l.scope.model.display_name)))];
+        for (const model of models) {
+            addRow(`${model} week`, accounts.map((a, i) => {
+                const limit = scopedWeeklyLimits(a.oauth).find(l => l.scope.model.display_name === model);
+                return limit ? barCell(i, limit.percent, severityRank(limit.severity)) : dimCell('—');
+            }));
+        }
+
+        // Monthly spend: share of the cap, then the amounts beneath.
+        if (accounts.some(a => a.oauth?.spend)) {
+            addRow('Spend', accounts.map((a, i) => {
+                const spend = a.oauth?.spend;
+                if (!spend) return dimCell('—');
+                if (spend.enabled === false) return dimCell('off');
+                return barCell(i, spend.percent ?? 0, severityRank(spend.severity));
+            }));
+            addRow('', accounts.map(a => {
+                const spend = a.oauth?.spend;
+                if (!spend || spend.enabled === false) return dimCell(spend?.disabled_reason ?? '');
+                return dimCell(`${fmtMoney(spend.used)} of ${fmtMoney(spend.limit ?? spend.cap?.money)}`);
+            }), 'claude-usage-subrow');
+        }
+
+        addRow('Session resets', accounts.map(a => {
+            if (!a.oauth) return dimCell('—');
+            const resetsAt = a.oauth.five_hour?.resets_at;
+            return resetsAt ? textCell(fmtUntilIso(resetsAt)) : dimCell('not started');
+        }));
+        addRow('Week resets', accounts.map(a => textCell(fmtWeekdayIso(a.oauth?.seven_day?.resets_at))));
+
+        this._table.add_child(new St.Widget({style_class: 'claude-usage-divider'}));
+
+        // ---- ccusage ----
+        const ccCell = (i, render) => {
+            if (ccStates[i] === 'dead') return dimCell(accounts[i].ccusageError ?? 'no data');
+            if (ccStates[i] === 'idle') return dimCell('—');
+            return textCell(render(accounts[i].activeBlock()));
+        };
+        addRow('Tokens', accounts.map((_, i) => ccStates[i] === 'idle'
+            ? dimCell('no active block')
+            : ccCell(i, b => fmtTokens(b.totalTokens ?? 0))));
+        addRow('Burn', accounts.map((_, i) => ccCell(i, b => `${fmtTokens(b.burnRate?.tokensPerMinute)} / min`)));
+        addRow('Ends in', accounts.map((_, i) => ccCell(i, b =>
+            b.endTime ? fmtUntilIso(b.endTime) : fmtMins(b.projection?.remainingMinutes))));
+    }
+
+    _openInTerminal() {
+        const script = this._accounts.map(a => a.terminalScript()).join('; ');
+        try {
+            Gio.Subprocess.new([TERMINAL, '--', 'bash', '-c',
+                `${script}; echo; read -n1 -r -p 'Press any key to close…'`], Gio.SubprocessFlags.NONE);
+        } catch (e) {
+            Main.notify('Claude Usage', `Could not open terminal: ${e.message}`);
+        }
+    }
+
+    destroy() {
+        this._accounts.forEach(a => a.destroy());
+        this._accounts = [];
         if (this._soup) {
             this._soup.abort();
             this._soup = null;
         }
-        // The rows are children of the menu, so super.destroy() disposes them;
-        // dropping the pool keeps this object from holding dead actors.
-        this._scopedRows = [];
-        this._scopedSection = null;
-        super.destroy();
+        this.button.destroy();
     }
-});
+}
 
 export default class ClaudeUsageExtension extends Extension {
     enable() {
         this._indicator = new ClaudeUsageIndicator();
-        Main.panel.addToStatusArea('claude-usage', this._indicator);
+        Main.panel.addToStatusArea('claude-usage', this._indicator.button);
     }
 
     disable() {

@@ -43,22 +43,7 @@ Behaviour to design:
 
 ## Multi-account support
 
-`~/.claude/.credentials.json` holds exactly one identity. If a user has
-multiple Claude accounts (personal vs work, etc.) and switches with
-`claude logout`/`claude login`, the indicator will pick up the new one
-on the next OAuth tick — but there is no way to display both simultaneously.
-
-Possibilities, in order of complexity:
-
-1. **Show the active subscription tier in the menu header** (cheap, no
-   multi-account: just expose `subscriptionType` and `rateLimitTier` from
-   the credentials file in the dropdown so the user knows which account is
-   active).
-2. **Multi-instance indicators** — let the user pin multiple top-bar items,
-   each tied to a different credentials file path. Requires a settings UI
-   first.
-
-(1) is probably enough for most users; (2) is speculative.
+The indicator shows every config directory listed in `ACCOUNTS` (default `~/.claude` and `~/.claude-private`), one meter and one table column each, with the plan from each credentials file in the column header. What remains is configuring that list without editing `extension.js`, which belongs in the settings UI (Phase 2.5).
 
 ## Submit to extensions.gnome.org
 
@@ -79,9 +64,6 @@ website, the repo needs:
 
 ## Smaller polish
 
-- **Icon asset** — replace the Unicode emoji indicator (🟢 / 🟡 / ⚪ / ⚠️)
-  with a proper themed SVG that respects the system accent colour. Low
-  priority; the emoji works fine.
 - **Click-to-copy** — add a menu item that copies the current ccusage and
   OAuth numbers to the clipboard for pasting into bug reports.
 - **History sparkline** — keep a rolling buffer of recent percentages and
