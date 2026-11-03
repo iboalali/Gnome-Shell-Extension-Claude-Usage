@@ -31,7 +31,7 @@ Each reload runs `enable()`, which builds a new `ClaudeUsageIndicator`. Its cons
 
 ## Rules for code that gets reloaded
 
-`disable()` must undo everything `enable()` did. Anything left behind keeps running the old version next to the new one. Here that means `ClaudeUsageIndicator.destroy()` must keep removing both timers (`_ccusageTimerId`, `_oauthTimerId`) and cancelling both cancellables. Any new timer, signal on a shell object, or subprocess needs matching cleanup there. Signals connected on the indicator's own menu items go away with the actor.
+`disable()` must undo everything `enable()` did. Anything left behind keeps running the old version next to the new one. Here that means `ClaudeUsageIndicator.destroy()` must keep removing every timer (each account's `_ccusageTimerId` and `_oauthTimerId`, and the indicator's `_renderTimerId`) and cancelling both cancellables. Any new timer, signal on a shell object, or subprocess needs matching cleanup there. Signals connected on the indicator's own menu items go away with the actor.
 
 ## Logs
 

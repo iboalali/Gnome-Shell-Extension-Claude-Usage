@@ -1,7 +1,7 @@
 {
   "uuid": "claude-usage@iboalali.github.io",
   "name": "Claude Usage",
-  "description": "Live Claude Code session usage in the top bar (token-level, via ccusage).",
+  "description": "Live Claude Code usage in the top bar for one or more accounts: session and weekly limits from the Claude usage endpoint, and the active 5-hour block from ccusage.",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
   "url": "https://github.com/iboalali/Gnome-Shell-Extension-Claude-Usage",
   "version-name": "0.1.0"

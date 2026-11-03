@@ -134,6 +134,7 @@ No GUI yet (see [ROADMAP.md](ROADMAP.md)). Tweak constants at the top of
 | `OAUTH_STALE_AFTER_MS`    | 20 min                         | When an account's bars fade as stale                  |
 | `OAUTH_DEAD_AFTER_MS`     | 2 h                            | When an account's OAuth path is treated as dead        |
 | `OAUTH_DEAD_MAX_FAILS`    | `6`                            | Consecutive non-2xx responses before marking dead      |
+| `RENDER_INTERVAL_SEC`     | `60`                           | Re-render between data updates, so countdowns tick     |
 
 ## Development
 

@@ -52,20 +52,25 @@ const OAUTH_DEAD_MAX_FAILS  = 6;
 const METER_PX = 40;
 const BAR_PX   = 80;
 
+// Re-renders between data updates, so countdowns and the stale/dead fading
+// follow the clock instead of jumping when ccusage or OAuth next reports.
+const RENDER_INTERVAL_SEC = 60;
+
 // ---- formatters ----
 function fmtTokens(n) {
     if (n == null) return '—';
-    if (n < 1000) return String(Math.round(n));
-    if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0) + 'k';
+    // Thresholds sit where rounding would carry into the next unit ("1000k").
+    if (n < 999.5) return String(Math.round(n));
+    if (n < 9_950) return (n / 1000).toFixed(1) + 'k';
+    if (n < 999_500) return (n / 1000).toFixed(0) + 'k';
     return (n / 1_000_000).toFixed(2) + 'M';
 }
 
 function fmtMins(m) {
     if (m == null || m < 0) return '—';
-    if (m < 60) return `${Math.round(m)}m`;
-    const h = Math.floor(m / 60);
-    const mm = Math.round(m % 60);
-    return `${h}h${String(mm).padStart(2, '0')}m`;
+    const total = Math.round(m);
+    if (total < 60) return `${total}m`;
+    return `${Math.floor(total / 60)}h${String(total % 60).padStart(2, '0')}m`;
 }
 
 function fmtPct(n) {
@@ -79,12 +84,10 @@ function fmtUntilIso(iso) {
     if (!Number.isFinite(t)) return '—';
     const diffMin = (t - Date.now()) / 60_000;
     if (diffMin < 0) return 'now';
-    if (diffMin < 60) return `${Math.round(diffMin)}m`;
-    const h = Math.floor(diffMin / 60);
-    const m = Math.round(diffMin % 60);
-    if (h < 24) return `${h}h${String(m).padStart(2, '0')}m`;
-    const d = Math.floor(h / 24);
-    return `${d}d${h % 24}h`;
+    const total = Math.round(diffMin);
+    if (total < 24 * 60) return fmtMins(total);
+    const h = Math.floor(total / 60);
+    return `${Math.floor(h / 24)}d${h % 24}h`;
 }
 
 // Local weekday and wall-clock for a reset timestamp, e.g. "Sat 16:59".
@@ -167,12 +170,62 @@ function logTag(msg) {
     log(`[claude-usage] ${msg}`);
 }
 
+// ---- one ccusage run at a time, across accounts ----
+// Each run rescans one account's whole transcript history (tens of CPU-seconds,
+// close to 1 GB), so accounts take turns instead of scanning in parallel. An
+// owner has at most one job waiting or running. A job receives `done` and
+// must call it once its run has finished, failed or been canceled.
+class CcusageRunner {
+    constructor() {
+        this._waiting = [];
+        this._running = null;
+        this._stopped = false;
+    }
+
+    run(owner, job) {
+        if (this._stopped || this.has(owner)) return;
+        this._waiting.push({owner, job});
+        this._next();
+    }
+
+    has(owner) {
+        return this._running?.owner === owner || this._waiting.some(j => j.owner === owner);
+    }
+
+    cancel(owner) {
+        this._waiting = this._waiting.filter(j => j.owner !== owner);
+        if (this._running?.owner === owner) {
+            this._running = null;
+            this._next();
+        }
+    }
+
+    // Drops every waiting job and starts no new one, so tearing down accounts
+    // one by one does not hand the turn to the next account.
+    stop() {
+        this._stopped = true;
+        this._waiting = [];
+        this._running = null;
+    }
+
+    _next() {
+        if (this._stopped || this._running || this._waiting.length === 0) return;
+        const entry = this._waiting.shift();
+        this._running = entry;
+        entry.job(() => {
+            if (this._running !== entry) return;
+            this._running = null;
+            this._next();
+        });
+    }
+}
+
 // ---- one account: its OAuth path and its ccusage path ----
 // The two paths keep separate timers, cancellables and state. `onChange` is
 // called after either path updates; only the indicator's _render() combines
 // them.
 class Account {
-    constructor(def, soup, onChange) {
+    constructor(def, soup, ccusageRunner, onChange) {
         this.label = def.label;
         this.letter = def.letter;
         this._configDir = def.configDir;
@@ -180,6 +233,7 @@ class Account {
         this._projectsDir = GLib.build_filenamev([def.configDir, 'projects']);
         this._cacheFile = GLib.build_filenamev([CACHE_DIR, def.cacheFile]);
         this._soup = soup;
+        this._ccusageRunner = ccusageRunner;
         this._onChange = onChange;
 
         this.plan = '';
@@ -190,6 +244,8 @@ class Account {
         this._lastTokenSeen = null;
         this._oauthTimerId = 0;
         this._oauthCancellable = null;
+        this._credsMonitor = null;
+        this._credsMonitorId = 0;
 
         this.ccusage = null;
         this.ccusageError = null;
@@ -217,44 +273,57 @@ class Account {
     // ---------- ccusage ----------
 
     refreshCcusage(force = false) {
-        // A run already in flight returns fresh data soon; starting another
-        // would scan the whole transcript history twice in parallel.
-        if (this._ccusageProc) return;
+        // A run already waiting or in flight returns fresh data soon; starting
+        // another would scan the whole transcript history twice.
+        if (this._ccusageProc || this._ccusageRunner.has(this)) return;
 
         const block = this.activeBlock();
         const blockEnded = block && Date.parse(block.endTime) <= Date.now();
         if (force || this.ccusageError || !this.ccusage || blockEnded ||
             this._ccusageRunStartSec == null) {
-            this._runCcusage();
+            this._queueCcusage();
             return;
         }
 
         // One second of slack covers transcript writes in the same second the
         // last run started.
         const argv = TRANSCRIPT_CHECK_CMD(this._projectsDir, this._ccusageRunStartSec - 1);
-        this._spawnCcusageStep(argv, (p, stdout) => {
-            // A failed check (e.g. no projects directory yet) falls back to a real run.
-            if (!p.get_successful() || stdout.trim() !== '') this._runCcusage();
+        // A check that fails or cannot start (e.g. no projects directory yet)
+        // falls back to a real run instead of marking the path dead.
+        this._spawnCcusageStep(argv, {
+            onDone: (p, stdout) => {
+                if (!p.get_successful() || stdout.trim() !== '') this._queueCcusage();
+            },
+            onSpawnError: () => this._queueCcusage(),
         });
     }
 
-    _runCcusage() {
-        this._ccusageRunStartSec = Math.floor(Date.now() / 1000);
-        this._spawnCcusageStep([CCUSAGE, ...CCUSAGE_ARGS], (p, stdout) => {
-            if (!p.get_successful()) {
-                this.ccusageError = 'ccusage exited non-zero';
-                this.ccusage = null;
-            } else {
-                this.ccusage = JSON.parse(stdout);
-                this.ccusageError = null;
-            }
+    // The run starts when the shared runner gives this account its turn, and
+    // the transcript check measures from that moment, not from the queueing.
+    _queueCcusage() {
+        this._ccusageRunner.run(this, done => {
+            this._ccusageRunStartSec = Math.floor(Date.now() / 1000);
+            this._spawnCcusageStep([CCUSAGE, ...CCUSAGE_ARGS], {
+                onDone: (p, stdout) => {
+                    if (!p.get_successful()) {
+                        this._failCcusage('ccusage exited non-zero');
+                    } else {
+                        this.ccusage = JSON.parse(stdout);
+                        this.ccusageError = null;
+                    }
+                },
+                onSettled: done,
+            });
         });
     }
 
     // Runs one subprocess of the ccusage path through _ccusageProc and
     // _ccusageCancellable, so destroy() releases it like any other run.
     // CLAUDE_CONFIG_DIR points ccusage at this account's transcripts only.
-    _spawnCcusageStep(argv, onDone) {
+    // `onSpawnError` defaults to marking the path dead. `onSettled` is called
+    // once the step is over, whatever the outcome.
+    _spawnCcusageStep(argv, {onDone, onSpawnError = e => this._failCcusage(`spawn: ${e.message}`),
+        onSettled = () => {}}) {
         this._ccusageCancellable = new Gio.Cancellable();
 
         let proc;
@@ -265,9 +334,9 @@ class Account {
             launcher.setenv('CLAUDE_CONFIG_DIR', this._configDir, true);
             proc = launcher.spawnv(argv);
         } catch (e) {
-            this.ccusageError = `spawn: ${e.message}`;
-            this.ccusage = null;
+            onSpawnError(e);
             this._onChange();
+            onSettled();
             return;
         }
         this._ccusageProc = proc;
@@ -278,12 +347,20 @@ class Account {
                 const [, stdout] = p.communicate_utf8_finish(res);
                 onDone(p, stdout ?? '');
             } catch (e) {
-                if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
-                this.ccusageError = `parse: ${e.message}`;
-                this.ccusage = null;
+                if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
+                    onSettled();
+                    return;
+                }
+                this._failCcusage(`parse: ${e.message}`);
             }
             this._onChange();
+            onSettled();
         });
+    }
+
+    _failCcusage(message) {
+        this.ccusageError = message;
+        this.ccusage = null;
     }
 
     activeBlock() {
@@ -343,7 +420,6 @@ class Account {
             this._scheduleOauthTick();
             return;
         }
-        const sameToken = token === this._lastTokenSeen;
         this._lastTokenSeen = token;
 
         if (this._oauthCancellable) this._oauthCancellable.cancel();
@@ -379,6 +455,7 @@ class Account {
                     this.oauthError = null;
                     this._oauthFailStreak = 0;
                     this._oauthInterval = OAUTH_BASE_SEC;
+                    this._unwatchCredentials();
                     this._writeOauthCache(this.oauth);
                     const scoped = scopedWeeklyLimits(data)
                         .map(l => ` ${l.scope.model.display_name}=${l.percent}`).join('');
@@ -394,15 +471,11 @@ class Account {
                 this._oauthInterval = Math.min(OAUTH_BACKOFF_MAX_SEC, this._oauthInterval * 2);
                 this._log(`OAuth 429; backoff -> ${this._oauthInterval}s`);
             } else if (status === 401) {
-                this._log(`OAuth 401${sameToken ? ' (same token)' : ' (new token)'}`);
-                if (!sameToken) {
-                    this._onChange();
-                    this._scheduleOauthTick(0);
-                    return;
-                }
                 this._oauthFailStreak++;
                 this.oauthError = {code: 401, message: 'unauthorized (401)', at: Date.now()};
                 this._oauthInterval = Math.min(OAUTH_BACKOFF_MAX_SEC, this._oauthInterval * 2);
+                this._log(`OAuth 401; backoff -> ${this._oauthInterval}s, watching credentials`);
+                this._watchCredentials();
             } else {
                 this._oauthFailStreak++;
                 this.oauthError = {code: status, message: `HTTP ${status}`, at: Date.now()};
@@ -411,6 +484,37 @@ class Account {
             this._onChange();
             this._scheduleOauthTick();
         });
+    }
+
+    // A rejected token only recovers once Claude Code writes a new one (a
+    // refresh or a re-login), so while unauthorized the credentials file is
+    // watched and a new token is tried right away instead of after the backoff.
+    // A rewrite that keeps the rejected token is ignored. Outside the 401 state
+    // nothing is watched, so routine token refreshes cost no extra request.
+    _watchCredentials() {
+        if (this._credsMonitor) return;
+        try {
+            this._credsMonitor = Gio.File.new_for_path(this._credsPath)
+                .monitor_file(Gio.FileMonitorFlags.NONE, null);
+        } catch (e) {
+            this._log(`credentials watch failed: ${e.message}`);
+            return;
+        }
+        this._credsMonitorId = this._credsMonitor.connect('changed', () => {
+            const token = this._readCredentials();
+            if (!token || token === this._lastTokenSeen) return;
+            this._log('new token after 401; retrying now');
+            this._unwatchCredentials();
+            this._scheduleOauthTick(0);
+        });
+    }
+
+    _unwatchCredentials() {
+        if (!this._credsMonitor) return;
+        this._credsMonitor.disconnect(this._credsMonitorId);
+        this._credsMonitor.cancel();
+        this._credsMonitor = null;
+        this._credsMonitorId = 0;
     }
 
     _loadOauthCacheSync() {
@@ -467,6 +571,7 @@ class Account {
     }
 
     destroy() {
+        this._ccusageRunner.cancel(this);
         if (this._ccusageTimerId) {
             GLib.source_remove(this._ccusageTimerId);
             this._ccusageTimerId = 0;
@@ -487,6 +592,7 @@ class Account {
             this._oauthCancellable.cancel();
             this._oauthCancellable = null;
         }
+        this._unwatchCredentials();
     }
 }
 
@@ -519,14 +625,15 @@ function label(text, styleClass) {
 // A plain class around a PanelMenu.Button rather than a GObject subclass, so
 // loading the module again in the same Shell registers no second GType.
 class ClaudeUsageIndicator {
-    constructor() {
+    constructor(version) {
         this.button = new PanelMenu.Button(0.0, 'Claude Usage');
         this.menu = this.button.menu;
 
-        this._soup = new Soup.Session({user_agent: 'claude-usage-gnome/0.2'});
+        this._soup = new Soup.Session({user_agent: `claude-usage-gnome/${version}`});
+        this._ccusageRunner = new CcusageRunner();
         this._accounts = ACCOUNTS
             .filter(def => GLib.file_test(def.configDir, GLib.FileTest.IS_DIR))
-            .map(def => new Account(def, this._soup, () => this._render()));
+            .map(def => new Account(def, this._soup, this._ccusageRunner, () => this._render()));
 
         // Top bar: one meter per account, then the active block.
         this._pill = new St.BoxLayout({style_class: 'claude-usage-pill', y_align: Clutter.ActorAlign.CENTER});
@@ -562,6 +669,10 @@ class ClaudeUsageIndicator {
 
         this._render();
         this._accounts.forEach(a => a.start());
+        this._renderTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RENDER_INTERVAL_SEC, () => {
+            this._render();
+            return GLib.SOURCE_CONTINUE;
+        });
     }
 
     _refresh() {
@@ -734,6 +845,11 @@ class ClaudeUsageIndicator {
     }
 
     destroy() {
+        if (this._renderTimerId) {
+            GLib.source_remove(this._renderTimerId);
+            this._renderTimerId = 0;
+        }
+        this._ccusageRunner.stop();
         this._accounts.forEach(a => a.destroy());
         this._accounts = [];
         if (this._soup) {
@@ -746,7 +862,7 @@ class ClaudeUsageIndicator {
 
 export default class ClaudeUsageExtension extends Extension {
     enable() {
-        this._indicator = new ClaudeUsageIndicator();
+        this._indicator = new ClaudeUsageIndicator(this.metadata['version-name'] ?? 'dev');
         Main.panel.addToStatusArea('claude-usage', this._indicator.button);
     }
 
