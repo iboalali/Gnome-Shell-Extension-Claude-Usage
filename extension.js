@@ -445,7 +445,9 @@ class Account {
                 return;
             }
 
-            const status = msg.get_status();
+            // libsoup's Soup.Status enum has no 429, so get_status() throws on a
+            // rate-limit response. The status_code property is a plain uint.
+            const status = msg.status_code;
             const body = bytes ? new TextDecoder().decode(bytes.get_data() || new Uint8Array()) : '';
 
             if (status === 200) {
